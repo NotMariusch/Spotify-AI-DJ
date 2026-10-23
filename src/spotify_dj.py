@@ -14,6 +14,7 @@ from collections import deque
 from playback_state import PlaybackTracker
 from instance_lock import InstanceLock
 from ai_request import ask_claude, resolve_artists_to_ids
+from ai_session import AISession, is_session_reset
 from music_request import RequestValidationError, constrain_tracks, resolve_song_wishes, release_year
 
 # =====================
@@ -59,6 +60,7 @@ ai_request_plan = None
 ai_request_tracks_ready = False
 ai_song_queue = []  # Explicit wishes only; consume after confirmed playback.
 ai_song_resolutions = {}  # Resume bounded lookups after a cooldown; request-local only.
+ai_session = AISession()  # Conversation, exclusions and listening history; never saved.
 
 tracker = PlaybackTracker()
 now_playing = tracker.track
@@ -1036,6 +1038,7 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
     if not pb:
         tracker.control = False
         return False
+    ai_session.record_play(name, chosen)
     tracker.start(name, mode, chosen, pb, time.monotonic(), ai=no_judge,
                   trial=name in discovered_artists and not discovered_artists[name].get("graduated", False))
     if no_judge:
@@ -1095,6 +1098,9 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
             if chosen.get("id") in banned_track_ids or name in banned_artist_names:
                 status("Der naechste Songwunsch ist gesperrt; Anfrage bitte anpassen")
                 return False
+            if not ai_session.allows(ai_request_plan, name, chosen, explicit=True):
+                status("Der Songwunsch widerspricht deinen Session-Ausschluessen")
+                return False
             try:
                 return start_selected(name, "ai", chosen, True)
             except DeviceUnavailable:
@@ -1117,7 +1123,8 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
             print(f"  {candidate}: fetched={len(tracks)}, eligible={len(filtered)}")
             available = [t for t in filtered if t.get("id") not in banned_track_ids
                          and normalize_title(t["name"]) not in recent_titles
-                         and normalize_title(t["name"]) not in ai_recent_titles]
+                         and normalize_title(t["name"]) not in ai_recent_titles
+                         and (not no_judge or ai_session.allows(ai_request_plan, candidate, t))]
             if not available:
                 print(f"  {candidate}: keine passenden, nicht kuerzlich gehoerten Tracks.")
                 continue
@@ -1177,6 +1184,9 @@ def publish_progress(pb):
 
 def publish_playback(pb):
     if pb and pb.get("item"):
+        if pb.get("is_playing"):
+            names = ', '.join(a.get('name', '') for a in pb['item'].get('artists', []))
+            ai_session.record_play(names, pb['item'])
         print(f"NOW_PLAYING:{pb['item'].get('name', '—')}")
         print(f"CURRENT_ARTIST:{', '.join(a.get('name', '') for a in pb['item'].get('artists', []))}")
     else:
@@ -1276,11 +1286,13 @@ def ensure_structured_request():
             else:
                 print(f"  AI: preparing constrained catalog for {name}...")
                 raw[name] = get_artist_tracks(name)
-        catalogs = {name: select_best_tracks(constrain_tracks(tracks, plan, tracks)) for name, tracks in raw.items()}
+        catalogs = {name: [t for t in select_best_tracks(constrain_tracks(tracks, plan, tracks))
+                           if ai_session.allows(plan, name, t)] for name, tracks in raw.items()}
         if plan.songs:
             qualify = lambda ts: [t for t in select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
                                   if t.get("id") not in banned_track_ids
-                                  and not ({a.get('name') for a in t.get('artists', [])} & banned_artist_names)]
+                                  and not ({a.get('name') for a in t.get('artists', [])} & banned_artist_names)
+                                  and ai_session.allows(plan, '', t, explicit=plan.kind == 'songs')]
             found, missing = resolve_song_wishes(sp, plan, ai_pool, raw, qualify, ai_song_resolutions)
             for title in missing:
                 print(f"  AI: nicht eindeutig/passend auf Spotify aufgeloest: {title}")
@@ -1302,6 +1314,7 @@ def ensure_structured_request():
         print(f"  AI: {sum(len(ts) for ts in catalogs.values())} passende Titel; {len(ai_song_queue)} konkrete Songwuensche")
         return True
     except RequestValidationError as error:
+        ai_session.note_problem(ai_session.turns[-1] if ai_session.turns else "", str(error))
         status(f"AI: {error}")
         return False
     except RateLimitError:
@@ -1375,7 +1388,8 @@ def prepare_next_track():
         available = [t for t in versions
                      if t.get("id") not in banned_track_ids
                      and normalize_title(t["name"]) not in recent_titles
-                     and normalize_title(t["name"]) not in ai_recent_titles]
+                     and normalize_title(t["name"]) not in ai_recent_titles
+                     and (not ai or ai_session.allows(ai_request_plan, name, t))]
         if available:
             _prepared_next = dict(owner=now_playing["generation"], request=request,
                                   selection=(name, mode, random.choice(available), ai))
@@ -1399,6 +1413,7 @@ def advance_to_next_track():
         tracker.control = False
         chosen = selection[2]
         if (chosen.get("id") in banned_track_ids or selection[0] in banned_artist_names
+                or (selection[3] and not ai_session.allows(ai_request_plan, selection[0], chosen, explicit=explicit))
                 or (not explicit and (normalize_title(chosen["name"]) in recent_titles
                                       or normalize_title(chosen["name"]) in ai_recent_titles))):
             status("Vorbereiteter Titel nicht mehr gueltig; neuer DJ-Befehl erforderlich")
@@ -1494,12 +1509,15 @@ def run_dj():
     while True:
         if os.path.exists(INPUT_FILE):
             try:
-                with open(INPUT_FILE) as f:
+                with open(INPUT_FILE, encoding="utf-8-sig") as f:
                     choice = f.read().strip()
                 os.remove(INPUT_FILE)
             except Exception:
                 time.sleep(1)
                 continue
+
+            if choice in ("1", "2", "3", "4", "5"):
+                ai_session.leave_ai()
 
             if choice == "quit":
                 print("DJ shutting down via hotkey.")
@@ -1575,14 +1593,24 @@ def run_dj():
                 ai_song_queue.clear()
                 ai_song_resolutions.clear()
                 user_request = choice[3:].strip()
+                if is_session_reset(user_request):
+                    ai_session.clear()
+                    ai_recent_titles.clear()
+                    publish_progress(None)
+                    status("AI-Session zurueckgesetzt; Steuerung freigegeben, neue Musikanfrage eingeben")
+                    continue
                 if not user_request:
                     print("  AI: empty request, ignoring.")
                 else:
                     print(f"  AI request: '{user_request}'")
                     try:
-                        ai_request_plan = ask_claude(user_request)
+                        ai_request_plan = ai_session.reconcile(ask_claude(user_request, ai_session.context()))
+                        ai_session.accept(ai_request_plan, user_request)
                         artist_names = ai_request_plan.artists
                         print("  AI interpretation: " + ai_request_plan.summary())
+                        print("  AI session: " + ("Folgeanfrage" if ai_request_plan.context_action == 'refine' else "Neue Musikauswahl")
+                              + f"; {len(ai_request_plan.excluded_artists)} Kuenstler-/{len(ai_request_plan.excluded_songs)} Song-Ausschluesse"
+                              + ("; keine Session-Wiederholungen" if ai_request_plan.avoid_session_repeats else ""))
                         print(f"  AI suggested: {artist_names}")
 
                         # Build artist dict for ID resolution only
@@ -1612,6 +1640,7 @@ def run_dj():
                             play_artist(name, "ai", [n for n, _ in ai_pool], interrupted=False, mode_switch=True, no_judge=True)
 
                     except RequestValidationError as error:
+                        ai_session.note_problem(user_request, str(error))
                         status(f"AI: {error}")
                     except Exception as e:
                         status(f"AI-Anfrage fehlgeschlagen ({type(e).__name__}); neuer DJ-Befehl erforderlich")

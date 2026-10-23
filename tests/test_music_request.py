@@ -188,7 +188,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         values = dict(tracker=self.tracker, now_playing=self.tracker.track,
                       ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_resolutions={},
                       ai_pool=[('Artist', 'artist')], ai_artists={'Artist': 'artist'},
-                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None,
+                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None, ai_session=dj.AISession(),
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
                       auto_mode='ai', current_pool=None, _prepared_next=None, _pending_selection=None,
                       memory=dj.default_memory(), artist_cache={}, track_disk_cache={},

@@ -41,6 +41,11 @@ class MusicRequest:
     mood: str
     selection: str
     continue_similar: bool = False
+    context_action: str = 'new'
+    artist_scope: str = 'fixed'
+    excluded_artists: tuple = ()
+    excluded_songs: tuple = ()
+    avoid_session_repeats: bool = False
 
     def summary(self):
         period = f'{self.year_start}–{self.year_end}' if self.year_start is not None else 'ohne Jahresgrenze'
@@ -52,7 +57,8 @@ class MusicRequest:
 
 def parse_music_request(data):
     fields = {'kind', 'artists', 'songs', 'year_start', 'year_end', 'style', 'mood', 'selection', 'continue_similar'}
-    if not isinstance(data, dict) or set(data) - fields - {'clarification'} or not fields <= set(data):
+    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats'}
+    if not isinstance(data, dict) or set(data) - fields - optional or not fields <= set(data):
         raise RequestValidationError('Ungueltige strukturierte AI-Antwort; bitte erneut versuchen.')
     clarification = data.get('clarification')
     if clarification is not None:
@@ -92,8 +98,29 @@ def parse_music_request(data):
         parsed.append(SongWish(song['artist'].strip(), song['title'].strip()))
     if (data['kind'] == 'songs' or data['selection'] == 'hits') and not parsed:
         raise RequestValidationError('Fuer Songwuensche/bekannte Hits fehlen konkrete Songvorschlaege.')
+    action, scope = data.get('context_action', 'new'), data.get('artist_scope', 'fixed')
+    if action not in ('new', 'refine') or scope not in ('fixed', 'suggested'):
+        raise RequestValidationError('Ungueltiger Session-Bezug der Anfrage.')
+    avoid = data.get('avoid_session_repeats', False)
+    if type(avoid) is not bool:
+        raise RequestValidationError('Ungueltige Wiederholungsregel.')
+    excluded = data.get('excluded_artists', [])
+    if not isinstance(excluded, list) or len(excluded) > 24 or any(
+            not isinstance(n, str) or not 1 <= len(n.strip()) <= 120 or not artist_key(n) for n in excluded):
+        raise RequestValidationError('Ungueltige ausgeschlossene Kuenstler.')
+    excluded_songs = data.get('excluded_songs', [])
+    if not isinstance(excluded_songs, list) or len(excluded_songs) > 40:
+        raise RequestValidationError('Ungueltige ausgeschlossene Songs.')
+    excluded_wishes = []
+    for song in excluded_songs:
+        if (not isinstance(song, dict) or set(song) != {'artist', 'title'} or any(
+                not isinstance(song[k], str) or not 1 <= len(song[k].strip()) <= 200 for k in song)
+                or not artist_key(song['artist']) or not song_key(song['title'])):
+            raise RequestValidationError('Ausgeschlossene Songs brauchen Kuenstler und Titel, keine Spotify-IDs.')
+        excluded_wishes.append(SongWish(song['artist'].strip(), song['title'].strip()))
     return MusicRequest(data['kind'], artists, tuple(parsed), start, end,
-                        data['style'].strip(), data['mood'].strip(), data['selection'], data['continue_similar'])
+                        data['style'].strip(), data['mood'].strip(), data['selection'], data['continue_similar'],
+                        action, scope, tuple(dict.fromkeys(n.strip() for n in excluded)), tuple(excluded_wishes), avoid)
 
 
 def check_explicit_period(request, text):

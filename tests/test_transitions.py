@@ -32,7 +32,7 @@ class TransitionTests(unittest.TestCase):
         self.stack.enter_context(patch.object(dj, 'now_playing', tracker.track))
         values = dict(_prepared_next=None, _pending_selection=None, _rate_limit_until=0,
                       auto_mode='jpop', current_pool=['Artist'], ai_pool=[], ai_artists={},
-                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None,
+                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None, ai_session=dj.AISession(),
                       ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_resolutions={},
                       artist_cache={'Artist': [track('Next')]}, track_disk_cache={},
                       memory=dj.default_memory(), banned_track_ids=set(), banned_artist_names=set())

@@ -19,6 +19,7 @@ class ProgressTelemetryTests(unittest.TestCase):
         self.stack.enter_context(patch.object(server, 'state', dict(server.state, playback_progress=None)))
         self.stack.enter_context(patch.object(server, 'dj_log_queue', queue.Queue()))
         self.spotify = self.stack.enter_context(patch.object(dj, 'sp', Mock()))
+        self.stack.enter_context(patch.object(dj, 'ai_session', dj.AISession()))
 
     def send(self, position=42000, uri='spotify:track:one', playing=True, duration=200000):
         pb = dict(item=dict(uri=uri, name='Song', duration_ms=duration, artists=[]),

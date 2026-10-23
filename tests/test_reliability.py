@@ -128,6 +128,7 @@ class IntegrationTests(unittest.TestCase):
         dj.ai_request_tracks_ready = False
         dj.ai_song_queue = []
         dj.ai_song_resolutions = {}
+        self.stack.enter_context(patch.object(dj, 'ai_session', dj.AISession()))
         dj.artist_cache = {}
         dj.track_disk_cache = {}
         dj.recent_titles.clear()

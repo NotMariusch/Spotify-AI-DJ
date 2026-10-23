@@ -84,7 +84,7 @@ class AIRotationTests(unittest.TestCase):
         self.tracker = PlaybackTracker()
         values = dict(tracker=self.tracker, now_playing=self.tracker.track,
                       ai_pool=[(n, n) for n in 'ABCD'], ai_artists={n: n for n in 'ABCD'},
-                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None,
+                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None, ai_session=dj.AISession(),
                       ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_resolutions={},
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
                       current_pool=None, auto_mode='ai', _prepared_next=None,

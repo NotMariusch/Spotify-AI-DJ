@@ -158,6 +158,21 @@ Concrete song wishes and lists are played in order (for example, `Play Complicat
 
 Resolution reuses catalogs and makes at most two track searches per song suggestion (up to 40 suggestions). A simple finite song list does not download complete artist catalogs. Preparation is sequential; a rate limit stops work, and a DJ skip after the cooldown resumes completed lookups from temporary memory. Every new AI request resets that lookup state. No temporary wishes are automatically added to permanent taste preferences.
 
+Follow-up requests can use the temporary conversation context, for example:
+```
+You: Play childhood banger pop songs from the 2000s
+You: Mehr davon, aber weniger aggressiv
+You: Heute kein Justin Timberlake
+You: Heute keine Wiederholungen von vorhin
+You: Neue AI-Session
+```
+
+Refinements retain the current period, style and hit preference. An explicitly restricted artist pool stays restricted; a model-suggested pool can adapt to a new mood. A self-contained new request can choose a different period or artists. The last confirmed song helps resolve “this song,” and answers to clarification questions include the pending original request. Ambiguous or invalid follow-ups produce a status message rather than an invented selection.
+
+Temporary artist/song exclusions and the no-repeat rule remain active across AI requests until `Neue AI-Session` (also `AI reset`) or a DJ process restart. Reset releases automatic control and waits for a new wish; it leaves the current Spotify playback running. Normal DJ modes ignore these AI filters and end the previous conversation topic. Their confirmed starts still count as earlier music for a later AI no-repeat request. The history covers at most 2,000 artist/title identities since the process started or the session was reset; album copies share an identity. Concrete repeat song wishes take priority over the general no-repeat rule, while explicit exclusions still require a session reset.
+
+Conversation context and listening history exist only in RAM. Claude receives the current validated intent, at most four previous user requests, any pending clarification, the last confirmed song and temporary filters—not Spotify IDs, complete catalogs, tokens or learned weights. Spotify playback observed while the DJ has released control can also update the last-song hint using the existing polling interval. No extra playback polls or model calls run just to maintain context.
+
 To return to a normal mode, use any hotkey (F13+1 through F13+5) or send a new AI request.
 
 You can also send regular commands through the chat window:
