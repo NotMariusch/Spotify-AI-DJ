@@ -32,6 +32,8 @@ class TransitionTests(unittest.TestCase):
         self.stack.enter_context(patch.object(dj, 'now_playing', tracker.track))
         values = dict(_prepared_next=None, _pending_selection=None, _rate_limit_until=0,
                       auto_mode='jpop', current_pool=['Artist'], ai_pool=[], ai_artists={},
+                      ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None,
+                      ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_resolutions={},
                       artist_cache={'Artist': [track('Next')]}, track_disk_cache={},
                       memory=dj.default_memory(), banned_track_ids=set(), banned_artist_names=set())
         for name, value in values.items():
@@ -176,6 +178,14 @@ class TransitionTests(unittest.TestCase):
             self.assertEqual(dj.playback_poll_interval(), 3.5)
         dj.now_playing['playing'] = False
         self.assertEqual(dj.playback_poll_interval(), 5)
+
+    def test_short_song_poll_targets_end_before_eighty_percent_sample(self):
+        dj.prepare_next_track()
+        dj.now_playing.update(duration=20000, progress_ms=15000, listened_ms=15000,
+                              sampled_at=15, stable_since=0)
+        with patch.object(dj.time, 'monotonic', return_value=15):
+            self.assertEqual(dj.playback_poll_interval(), 3.5)
+        self.assertFalse(dj.tracker.can_finish_early(15, dj.TRANSITION_LEAD_MS))
 
 
 if __name__ == '__main__':

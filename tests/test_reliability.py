@@ -121,6 +121,13 @@ class IntegrationTests(unittest.TestCase):
         dj.memory = dj.default_memory()
         dj.ai_pool = []
         dj.ai_artists = {}
+        dj.ai_session_catalogs = {}
+        dj.ai_artist_plays = {}
+        dj.ai_last_artist = None
+        dj.ai_request_plan = None
+        dj.ai_request_tracks_ready = False
+        dj.ai_song_queue = []
+        dj.ai_song_resolutions = {}
         dj.artist_cache = {}
         dj.track_disk_cache = {}
         dj.recent_titles.clear()

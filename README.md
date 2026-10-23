@@ -142,7 +142,21 @@ You: Ado and Eve                  ← plays only those two artists
 
 When you name one or more specific artists, the DJ plays only those artists. When you describe a vibe, genre, or mood, the DJ asks Claude to pick 5–8 matching artists.
 
-The DJ will ask Claude for matching artists, search Spotify for each one, and start playing from that pool continuously. AI plays never affect your weight system — your carefully tuned weights are completely unaffected.
+Claude interprets the request into validated fields for artists, songs, years, style, mood, and hit selection. Spotify supplies all actual artist/track IDs. AI plays never affect your weight system or permanent artist pools.
+
+Artist lookup checks up to ten candidates using an artist-filtered search, with at most one plain-name fallback. Accents and punctuation are normalized; `Pink` explicitly resolves as `P!nk`, never as `PinkPantheress`. Ambiguous exact-name profiles are skipped rather than guessed. The search size follows the [current Spotify Search API limit](https://developer.spotify.com/documentation/web-api/reference/search).
+
+Before the first AI track starts, catalogs for the resolved request pool are prepared sequentially, reusing valid caches. This can make a new request slower to start. Rate limits stop preparation instead of silently reducing the session to the first cached artist; retry after the indicated cooldown. No catalog requests run in the automatic transition's end window.
+
+Rotation chooses randomly among the less-played requested artists and avoids immediately repeating an artist whenever another requested artist has an eligible track. One-artist requests remain one-artist requests. These counters update only after confirmed playback, live only in memory, and reset on a new AI request. They are rotation bookkeeping, not a learned preference profile; they never change normal weights, artist pools, trial progress, or persistent recent history. The catalog cache stores Spotify metadata only.
+
+A request such as `2000s pop` restricts tracks to 2000–2009. For hits/bangers/nostalgia, Claude supplies concrete song suggestions and the DJ uses only suggestions resolved to the correct Spotify artist and title, within the requested years. Genre, mood, and how recognizable a song is remain model recommendations; Spotify metadata verifies identity and dates, not subjective fit. Invalid or missing suggestions do not fall back to arbitrary catalog tracks.
+
+Era checks use Spotify album release dates and the earliest observed matching catalog release. Later reissues require an identical ISRC with a known release in the requested period; unknown dates are excluded. This is conservative catalog evidence, not a guarantee of the original worldwide release date. Some valid songs may be unavailable when that evidence is missing.
+
+Concrete song wishes and lists are played in order (for example, `Play Complicated by Avril Lavigne, then Toxic by Britney Spears`). A missing or materially ambiguous requested song stops resolution with an explanation instead of silently replacing it or starting a partial list. Only an explicit request for similar music enables continuation after the list. Otherwise playback pauses after the final song, using the agreed approximately 1.5-second early transition to prevent album playback from spilling into an unrelated song. A curated hits pool also pauses when its non-recent matching titles are exhausted; it does not automatically make another paid model request.
+
+Resolution reuses catalogs and makes at most two track searches per song suggestion (up to 40 suggestions). A simple finite song list does not download complete artist catalogs. Preparation is sequential; a rate limit stops work, and a DJ skip after the cooldown resumes completed lookups from temporary memory. Every new AI request resets that lookup state. No temporary wishes are automatically added to permanent taste preferences.
 
 To return to a normal mode, use any hotkey (F13+1 through F13+5) or send a new AI request.
 

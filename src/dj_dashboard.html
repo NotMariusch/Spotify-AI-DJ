@@ -517,7 +517,7 @@
     if (/^--- .+ ---$/.test(line))                   return "section";
     if (/^dj ->|^global dj ->/.test(l))              return "dj-pick";
     if (/weight \[/.test(line))                       return "weight";
-    if (/ai request|ai suggested|ai artist/.test(l)) return "ai-line";
+    if (/ai request|ai suggested|ai artist|ai interpretation|ai year evidence/.test(l)) return "ai-line";
     if (/discovery|graduated|trial play/.test(l))    return "discovery";
     if (/error|failed|exception|traceback/.test(l))  return "error";
     if (/track finished|track near end|playback resumed/.test(l)) return "track-end";

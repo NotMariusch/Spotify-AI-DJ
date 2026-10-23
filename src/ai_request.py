@@ -2,54 +2,57 @@
 ai_request.py — Claude-powered artist selection for SpotifyDJ.
 
 Called by spotify_dj.py when it reads an "ai:..." command from dj_input.txt.
-Returns a list of artist names to play, which the DJ then searches Spotify for.
+Returns a validated, temporary request; Spotify supplies all actual IDs.
 """
 
 import json
 import os
 import urllib.request
 import urllib.error
+from music_request import MusicRequest, RequestValidationError, artist_key, parse_music_request, check_explicit_period
 
 
-def ask_claude(user_request: str) -> list[str]:
-    """
-    Send the user's request to Claude API.
-    Returns a list of artist name strings (5-8 artists).
-    """
+def ask_claude(user_request: str) -> MusicRequest:
+    """Interpret a wish without sending Spotify catalog data to the model."""
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
 
     system_prompt = (
-        "You are the music brain of a Spotify DJ application. "
-        "Your only job is to return a JSON array of artist name strings — nothing else. "
-        "No explanation, no preamble, no markdown, no code fences. Just a raw JSON array.\n\n"
+        "Interpret a music request as ONE JSON object, no markdown or commentary. "
+        "Never output Spotify IDs, URIs or URLs; the application resolves everything on Spotify. "
+        "Required schema: {\"kind\":\"discovery\"|\"songs\", \"artists\":[strings], "
+        "\"songs\":[{\"artist\":string,\"title\":string}], \"year_start\":integer|null, "
+        "\"year_end\":integer|null, \"style\":string, \"mood\":string, "
+        "\"selection\":\"any\"|\"hits\", \"continue_similar\":boolean}. "
+        "Optional clarification: a short German question or null.\n"
         "Rules:\n"
-        "- If the user names one or more specific artists, return ONLY those exact artists. "
-        "Do not add similar artists or recommendations. Just the ones they named.\n"
-        "- If the request is a vibe, mood, genre, or activity (e.g. 'chill anime music', "
-        "'current pop hits', 'something hype'), return 5 to 8 artists that best fit.\n"
-        "- Genre accuracy is critical. Artists must strictly match the genre or style requested. "
-        "Do not include artists from adjacent or loosely related genres. "
-        "For example: a K-Pop request must return K-Pop acts only, not indie pop or Western pop. "
-        "An anime music request must return Japanese artists who make anime openings/endings, "
-        "not general J-Pop or artists from unrelated genres.\n"
-        "- Only return artists with a well-established presence on Spotify. "
-        "No extremely obscure acts that are unlikely to have a proper catalog.\n"
-        "- Match artist names as accurately as possible — correct minor spelling or "
-        "speech-recognition errors (e.g. 'huntr x' → 'HUNTR/X' or best match on Spotify).\n"
-        "- Never include song titles, only artist names.\n"
-        "- Output must be valid JSON, e.g.: [\"Artist One\", \"Artist Two\", \"Artist Three\"]"
+        "- Preserve all explicit era/style/mood constraints. 2000s/2000er means 2000 through 2009; "
+        "2010s means 2010 through 2019. No year constraint means BOTH year fields null. "
+        "Do not guess a user's childhood decade if they did not give one.\n"
+        "- kind=songs only for concrete song wishes. Preserve every requested song and its order. "
+        "No additional songs or similar artists unless the user explicitly asks to continue with similar music; "
+        "only then continue_similar=true. Song lists by themselves never imply similar music.\n"
+        "- Artist-only wishes (e.g. Ado and Eve) use discovery, selection=any, songs=[] and ONLY the named artists. "
+        "Do not turn a simple artist wish into a curated hits list.\n"
+        "- For genres/moods/activities use discovery and 5-8 suitable artists, strictly matching the style. "
+        "Never add artists outside an explicit artist restriction.\n"
+        "- Hits, bangers, classics or nostalgia/childhood requests use selection=hits. For broad decade-pop "
+        "requests favor recognizable hits. Provide 16-32 well-known concrete song suggestions across the "
+        "selected artists (when possible at least two per artist), respecting the requested era and style. "
+        "These are suggestions, not proof: the application validates them. Never invent song titles.\n"
+        "- Every song artist must be in artists. Use accurate canonical names (e.g. P!nk). "
+        "At most 12 artists and 40 songs. style and mood are concise descriptions, empty if absent.\n"
+        "- If a concrete title has materially ambiguous artist attribution, ask via clarification instead of "
+        "guessing. In that case include all schema fields but artists/songs may be empty. "
+        "Do not request clarification for an unambiguous well-known full artist/title pair.\n"
+        "- continue_similar is false for every discovery request."
     )
-
-    user_prompt = (
-        f"User request: {user_request}\n\n"
-        "Return a JSON array of artist names that best fit this request."
-    )
+    user_prompt = f"Interpret this request: {user_request}"
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
-        "max_tokens": 1000,
+        "max_tokens": 4000,
         "system": system_prompt,
         "messages": [
             {"role": "user", "content": user_prompt}
@@ -93,47 +96,54 @@ def ask_claude(user_request: str) -> list[str]:
             raw = raw[4:]
     raw = raw.strip()
 
-    artists = json.loads(raw)
-    if not isinstance(artists, list):
-        raise ValueError(f"Claude returned non-list: {raw}")
-
-    return [str(a).strip() for a in artists if a]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RequestValidationError("Die AI-Antwort war kein gueltiges JSON; bitte erneut versuchen.") from None
+    return check_explicit_period(parse_music_request(parsed), user_request)
 
 
 def resolve_artists_to_ids(sp, artist_names: list[str], known_artists: dict) -> list[tuple[str, str]]:
-    """
-    Given a list of artist name strings, return (name, spotify_id) pairs.
-    Checks the known library first, falls back to Spotify search.
-    Returns only artists that could be resolved.
-    """
-    # Build a lowercase lookup of known artists for fast matching
-    known_lower = {k.lower(): (k, v) for k, v in known_artists.items()}
-
-    resolved = []
+    known = {artist_key(name): (name, artist_id) for name, artist_id in known_artists.items()}
+    resolved, seen, resolved_keys = [], set(), set()
     for name in artist_names:
-        lower = name.lower()
-
-        # Check known library first
-        if lower in known_lower:
-            canonical, artist_id = known_lower[lower]
-            print(f"  AI artist (known): {canonical}")
-            resolved.append((canonical, artist_id))
+        key = artist_key(name)
+        if not key or key in resolved_keys:
             continue
-
-        # Search Spotify for unknown artists
+        if key in known:
+            canonical, artist_id = known[key]
+            if artist_id not in seen:
+                print(f"  AI artist (known): {canonical}")
+                resolved.append((canonical, artist_id))
+                seen.add(artist_id)
+                resolved_keys.add(key)
+            continue
+        query_name = "P!nk" if name.casefold().strip() == "pink" else name
+        quoted_name = query_name.replace('"', ' ').replace('\\', ' ').strip()
+        found = None
         try:
-            results = sp.search(q=name, type="artist", limit=1)
-            items = results.get("artists", {}).get("items", [])
-            if items:
-                found = items[0]
-                if found["name"].lower() != name.lower():
-                    print(f"  AI artist (name mismatch): Spotify returned '{found['name']}' for '{name}' — skipping")
-                else:
-                    print(f"  AI artist (found on Spotify): {found['name']} (searched: {name})")
-                    resolved.append((found["name"], found["id"]))
-            else:
-                print(f"  AI artist (not found on Spotify): {name} — skipping")
-        except Exception as e:
-            print(f"  AI artist search failed for '{name}': {e}")
-
+            # Two bounded searches, 10 candidates each. The top hit alone is
+            # not evidence of identity (e.g. PinkPantheress for Pink).
+            for query in (f'artist:"{quoted_name}"', query_name):
+                results = sp.search(q=query, type="artist", limit=10, market="DE")
+                items = (results or {}).get("artists", {}).get("items", [])
+                exact = {a["id"]: a for a in items
+                         if a.get("id") and isinstance(a.get("name"), str) and artist_key(a["name"]) == key}
+                if len(exact) == 1:
+                    found = next(iter(exact.values()))
+                    break
+                if len(exact) > 1:
+                    print(f"  AI artist (ambiguous): multiple exact profiles for '{name}' — skipping")
+                    break
+            if found and found["id"] not in seen:
+                print(f"  AI artist (found on Spotify): {found['name']} (searched: {name})")
+                resolved.append((found["name"], found["id"]))
+                seen.add(found["id"])
+                resolved_keys.add(key)
+            elif not found:
+                print(f"  AI artist: no unambiguous matching profile for '{name}' — skipping")
+        except Exception as error:
+            if getattr(error, "http_status", None) == 429 or hasattr(error, "retry_after"):
+                raise  # Respect the shared cooldown rather than trying every remaining artist.
+            print(f"  AI artist search failed for '{name}': {type(error).__name__}")
     return resolved
