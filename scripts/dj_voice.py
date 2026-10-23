@@ -34,6 +34,8 @@ if not IS_LINUX:
 
 BASE_DIR   = Path(__file__).resolve().parent.parent
 INPUT_FILE = BASE_DIR / "data" / "dj_input.txt"
+sys.path.insert(0, str(BASE_DIR / "src"))
+from instance_lock import InstanceLock
 
 SAMPLE_RATE = 16000
 CHANNELS    = 1
@@ -42,6 +44,8 @@ recording    = False
 frames       = []
 stream       = None
 frames_lock  = threading.Lock()
+toggle_lock  = threading.Lock()
+processing   = False
 
 
 def send_command(text: str):
@@ -49,74 +53,93 @@ def send_command(text: str):
         f.write(text)
 
 
-def log_to_server(msg: str):
+def log_to_server(msg: str, recording_state=None):
     """Send a log message to the dashboard server (best-effort, silent on failure)."""
     try:
-        payload = _json.dumps({"msg": msg}).encode("utf-8")
+        data = {"msg": msg}
+        if recording_state is not None:
+            data["recording"] = recording_state
+        payload = _json.dumps(data).encode("utf-8")
         req = urllib.request.Request(
             "http://127.0.0.1:5001/voice_log",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        urllib.request.urlopen(req, timeout=1)
+        with urllib.request.urlopen(req, timeout=1):
+            pass
     except Exception:
         pass  # server not running — just print to terminal
 
 
 def audio_to_wav(audio: np.ndarray) -> str:
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    with wave.open(tmp.name, "wb") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(2)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio.tobytes())
-    return tmp.name
+    # Close the temporary handle before reopening the path on Windows.
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+    try:
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio.tobytes())
+        return wav_path
+    except Exception:
+        os.unlink(wav_path)
+        raise
 
 
 def transcribe(wav_path: str):
     r = sr.Recognizer()
+    r.operation_timeout = 15
     with sr.AudioFile(wav_path) as source:
         audio = r.record(source)
     try:
         return r.recognize_google(audio)
     except sr.UnknownValueError:
         print("  Could not understand audio.")
+        log_to_server("Keine Sprache erkannt. Bitte erneut versuchen.")
         return None
     except sr.RequestError as e:
         print(f"  Speech recognition error: {e}")
+        log_to_server("Spracherkennung nicht erreichbar. Internetverbindung pruefen.")
         return None
 
 
 def start_recording():
     global recording, frames, stream
-    recording = True
     frames    = []
-    msg = "  Recording... (press F13+V again to stop)"
-    print(msg)
-    log_to_server("🎙 Recording...")
 
     def callback(indata, frame_count, time_info, status):
         if recording:
             with frames_lock:
                 frames.append(indata.copy())
 
-    stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
-        dtype="int16",
-        callback=callback,
-    )
-    stream.start()
+    try:
+        stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16", callback=callback,
+        )
+        stream.start()
+        recording = True
+    except Exception:
+        recording = False
+        if stream:
+            stream.close()
+            stream = None
+        raise
+    print("  Recording... (press F13+V again to stop)")
+    log_to_server("🎙 Recording...", recording_state=True)
 
 
 def stop_recording():
     global recording, stream
     recording = False
+    log_to_server("Aufnahme beendet.", recording_state=False)
     if stream:
-        stream.stop()
-        stream.close()
-        stream = None
+        try:
+            stream.stop()
+        finally:
+            stream.close()
+            stream = None
 
     with frames_lock:
         captured = list(frames)
@@ -145,15 +168,36 @@ def stop_recording():
     print()
 
 
+def finish_recording():
+    global processing
+    try:
+        stop_recording()
+    except Exception as error:
+        print(f"  Voice processing failed: {type(error).__name__}")
+        log_to_server(f"Voice-Verarbeitung fehlgeschlagen ({type(error).__name__}).", recording_state=False)
+    finally:
+        with toggle_lock:
+            processing = False
+
+
 def on_hotkey():
-    global recording
-    if not recording:
-        start_recording()
-    else:
-        threading.Thread(target=stop_recording, daemon=True).start()
+    global recording, processing
+    with toggle_lock:
+        if processing:
+            return  # Do not replace the audio while it is being transcribed.
+        if not recording:
+            try:
+                start_recording()
+            except Exception as error:
+                print(f"  Microphone failed: {type(error).__name__}")
+                log_to_server("Mikrofon nicht verfuegbar. Windows-Mikrofonzugriff und Standard-Eingabegeraet pruefen.", recording_state=False)
+        else:
+            recording = False
+            processing = True
+            threading.Thread(target=finish_recording, daemon=True).start()
 
 
-def main():
+def run_voice():
     print("=" * 50)
     print("  SpotifyDJ - Voice Mode")
     print("=" * 50)
@@ -185,6 +229,7 @@ def main():
             sys.exit(0)
     else:
         keyboard.add_hotkey("f13+v", on_hotkey, suppress=True)
+        log_to_server("Voice bereit: F13 + V startet/stoppt die Aufnahme.", recording_state=False)
         print("  Listening for F13+V...")
         print()
         try:
@@ -192,6 +237,20 @@ def main():
         except KeyboardInterrupt:
             print("\nClosing voice mode.")
             sys.exit(0)
+
+
+def main():
+    lock = InstanceLock(str(BASE_DIR / "data" / "voice.lock"))
+    if not lock.acquire():
+        print("Voice mode is already running.")
+        return
+    try:
+        run_voice()
+    finally:
+        if stream:
+            stream.close()
+        log_to_server("Voice beendet.", recording_state=False)
+        lock.release()
 
 
 if __name__ == "__main__":

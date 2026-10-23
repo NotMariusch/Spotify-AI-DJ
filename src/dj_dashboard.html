@@ -71,7 +71,10 @@
     font-weight: 700;
     font-size: 15px;
     white-space: nowrap;
-    flex-shrink: 0;
+    min-width: 0;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .np-sep { color: var(--muted); flex-shrink: 0; }
   .np-track {
@@ -80,6 +83,36 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .playback-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 1 320px;
+    min-width: 160px;
+    color: #a0a0b5;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .progress-time { min-width: 4ch; text-align: center; }
+  .progress-rail {
+    flex: 1;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 4px;
+    background: #2a2a35;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: inherit;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  .playback-progress.is-stale .progress-fill { background: #77778b; }
+  @media (max-width: 900px) {
+    header { gap: 12px; padding: 0 16px; }
+    .playback-progress { flex-basis: 200px; min-width: 130px; gap: 6px; }
   }
   .rec-indicator {
     display: flex;
@@ -167,6 +200,51 @@
   .log-line.discovery { color: var(--warn); }
   .log-line.track-end { color: var(--muted); font-style: italic; }
   .log-line.filter    { color: #7777aa; font-size: 11px; }
+  .log-line.section {
+    margin: 16px 0 8px;
+    padding-top: 10px;
+    border-top: 1px solid #30303d;
+    color: #a0a0b5;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .log-line.section:first-child { margin-top: 0; }
+
+  .hotkey-help {
+    flex-shrink: 0;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 11px;
+    line-height: 1.6;
+    max-height: 35vh;
+    overflow: auto;
+  }
+  .hotkey-title { color: #a0a0b5; margin-bottom: 10px; }
+  .hotkey-list {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(max-content, 1fr));
+    gap: 8px 24px;
+    list-style: none;
+  }
+  .hotkey-list li { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .hotkey-list kbd {
+    flex-shrink: 0;
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    font: inherit;
+    color: var(--accent);
+  }
+  @media (max-width: 1300px) {
+    .hotkey-list { grid-template-columns: repeat(2, minmax(max-content, 1fr)); }
+  }
+  @media (max-width: 1000px) {
+    .hotkey-list { grid-template-columns: minmax(max-content, 1fr); }
+  }
 
   /* AI INPUT */
   .ai-input-area {
@@ -252,6 +330,14 @@
     <span class="np-sep" id="now-sep" style="display:none">—</span>
     <span class="np-track" id="now-track"></span>
   </div>
+  <div class="playback-progress is-stale" id="playback-progress" title="Keine Playback-Daten">
+    <span class="progress-time" id="progress-elapsed">--:--</span>
+    <div class="progress-rail" id="progress-rail" role="progressbar"
+         aria-label="Songfortschritt" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Keine Playback-Daten">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+    <span class="progress-time" id="progress-duration">--:--</span>
+  </div>
   <div class="rec-indicator" id="rec-indicator">
     <div class="rec-dot"></div>REC
   </div>
@@ -260,8 +346,23 @@
 
 <main>
   <div class="panel">
-    <div class="panel-header"><div class="dot"></div>DJ Output</div>
+    <div class="panel-header"><div class="dot"></div><span id="dj-status">Warte auf DJ</span></div>
     <div class="log" id="dj-log"></div>
+    <aside class="hotkey-help" aria-label="Hotkeys">
+      <div class="hotkey-title">Hotkeys · F13 = rechte Strg</div>
+      <ul class="hotkey-list">
+        <li><kbd>F13 + 1</kbd> = American Rap</li>
+        <li><kbd>F13 + 2</kbd> = German Trap</li>
+        <li><kbd>F13 + 3</kbd> = K-Pop</li>
+        <li><kbd>F13 + 4</kbd> = J-Pop</li>
+        <li><kbd>F13 + 5</kbd> = Global</li>
+        <li><kbd>F13 + 6</kbd> = Skip</li>
+        <li><kbd>F13 + 7</kbd> = Entdeckten Künstler sperren</li>
+        <li><kbd>F13 + 8</kbd> = Song sperren</li>
+        <li><kbd>F13 + 9</kbd> = DJ beenden</li>
+        <li><kbd>F13 + V</kbd> = Sprachaufnahme starten/stoppen</li>
+      </ul>
+    </aside>
   </div>
   <div class="panel" style="flex-direction:column;display:flex;overflow:hidden;">
     <div class="panel-header"><div class="dot" style="background:var(--accent3)"></div>Voice / Chat</div>
@@ -299,7 +400,60 @@
   const MAX_LINES = 300;
   const modeMap = {"American Rap":"btn-1","German Trap":"btn-2","K-Pop":"btn-3","J-Pop":"btn-4","Global":"btn-5","AI":"btn-ai"};
 
+  // Progress model: repeated websocket broadcasts are not new Spotify samples.
+  function progressSampleFromState(data, previous, now) {
+    const sample = data.playback_progress;
+    if (!sample) return null;
+    if (previous && previous.id === sample.sample_id) return previous;
+    return {
+      id: sample.sample_id, position: sample.progress_ms, duration: sample.duration_ms,
+      playing: sample.is_playing, age: Math.max(0, sample.age_ms || 0), receivedAt: now,
+    };
+  }
+
+  function progressAt(sample, now) {
+    if (!sample) return null;
+    const age = sample.age + Math.max(0, now - sample.receivedAt);
+    // External playback is polled every 15s. Stop estimating after a missed
+    // sample instead of animating indefinitely through an outage.
+    const position = sample.position + (sample.playing ? Math.min(age, 18000) : 0);
+    return { position: Math.max(0, Math.min(sample.duration, position)),
+             duration: sample.duration, stale: sample.playing && age > 18000,
+             playing: sample.playing };
+  }
+
+  function formatProgressTime(ms) {
+    const seconds = Math.floor(Math.max(0, ms) / 1000);
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+  // End progress model.
+
+  let progressSample = null;
+  function renderProgress() {
+    const value = progressAt(progressSample, performance.now());
+    const rail = document.getElementById("progress-rail");
+    const elapsed = value ? formatProgressTime(value.position) : "--:--";
+    const duration = value ? formatProgressTime(value.duration) : "--:--";
+    const description = !value ? "Keine Playback-Daten"
+      : value.stale ? "Warte auf neue Playback-Daten"
+      : `${elapsed} / ${duration}${value.playing ? "" : " · Pausiert"}`;
+    document.getElementById("progress-elapsed").textContent = elapsed;
+    document.getElementById("progress-duration").textContent = duration;
+    document.getElementById("playback-progress").classList.toggle("is-stale", !value || value.stale);
+    document.getElementById("playback-progress").title = description;
+    const fraction = value ? value.position / value.duration : 0;
+    document.getElementById("progress-fill").style.transform = `scaleX(${fraction})`;
+    rail.setAttribute("aria-valuetext", description);
+    if (value) rail.setAttribute("aria-valuenow", String(Math.round(fraction * 100)));
+    else rail.removeAttribute("aria-valuenow");
+  }
+  setInterval(renderProgress, 100);
+  socket.on("disconnect", () => { progressSample = null; renderProgress(); });
+
   socket.on("state", (s) => {
+    progressSample = progressSampleFromState(s, progressSample, performance.now());
+    renderProgress();
+    document.getElementById("dj-status").textContent = s.status || "Warte auf DJ";
     // Artist
     document.getElementById("now-artist").textContent = s.current_artist || "—";
 
@@ -334,7 +488,7 @@
       pb.style.borderColor   = "var(--accent)";
       pb.style.color         = "var(--accent)";
     } else {
-      pb.textContent         = "⏸ Paused";
+      pb.textContent         = "⏸ Nicht bestätigt / pausiert";
       pb.style.borderColor   = "#555566";
       pb.style.color         = "#555566";
     }
@@ -349,8 +503,9 @@
     lines.forEach(line => {
       if (!line.trim()) return;
       const div = document.createElement("div");
-      div.className   = "log-line " + classifier(line);
-      div.textContent = line;
+      const category = classifier(line);
+      div.className   = "log-line " + category;
+      div.textContent = category === "section" ? line.slice(4, -4) : line;
       el.appendChild(div);
     });
     while (el.children.length > MAX_LINES) el.removeChild(el.firstChild);
@@ -359,13 +514,14 @@
 
   function classifyDJ(line) {
     const l = line.toLowerCase();
-    if (/^dj ->|^global dj ->/.test(line))           return "dj-pick";
+    if (/^--- .+ ---$/.test(line))                   return "section";
+    if (/^dj ->|^global dj ->/.test(l))              return "dj-pick";
     if (/weight \[/.test(line))                       return "weight";
     if (/ai request|ai suggested|ai artist/.test(l)) return "ai-line";
     if (/discovery|graduated|trial play/.test(l))    return "discovery";
     if (/error|failed|exception|traceback/.test(l))  return "error";
-    if (/track finished|playback resumed/.test(l))   return "track-end";
-    if (/fetched:|after filter:|after recent filter:|after ban filter:|device:/.test(l)) return "filter";
+    if (/track finished|track near end|playback resumed/.test(l)) return "track-end";
+    if (/fetched[=:]|after filter:|after recent filter:|after ban filter:|device:/.test(l)) return "filter";
     return "";
   }
 

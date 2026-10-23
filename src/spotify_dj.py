@@ -3,16 +3,16 @@ import sys
 import time
 import json
 import random
-import traceback
-import datetime
 import re
+import math
 import urllib.request
 import urllib.parse
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
-from pathlib import Path
 from collections import deque
+from playback_state import PlaybackTracker
+from instance_lock import InstanceLock
 from ai_request import ask_claude, resolve_artists_to_ids
 
 # =====================
@@ -52,26 +52,27 @@ auto_mode    = None
 ai_pool      = []  # list of (name, artist_id) tuples — set by AI requests
 ai_artists   = {}  # temporary artist ID lookup for AI-only artists — never added to permanent pools
 
-# Tracks what's currently playing so we can judge it when the next track starts.
-now_playing = {
-    "artist":      None,   # artist name string
-    "mode":        None,   # mode string ("american_rap", "kpop", etc.)
-    "duration":    0,      # track duration_ms
-    "started":     0.0,    # time.time() when playback started
-    "progress_ms": 0,      # last known Spotify progress_ms, updated each poll
-                            # used by judge_last_track() to avoid wall-clock drift
-    "is_trial":    False,  # True if the current artist is a non-graduated discovery
-    "is_ai_play":  False,  # True if the current track was started by AI mode — never judged
-    "uri":         None,   # URI of the track the DJ started, used to detect natural end
-}
+tracker = PlaybackTracker()
+now_playing = tracker.track
+_pending_selection = None
+_prepared_next = None
+TRANSITION_LEAD_MS = 1500
+PREPARE_LEAD_MS = 20000
+_next_device_check = 0.0
+_next_external_poll = 0.0
+_last_status = None
 
-# Prevents the pause detection message from printing every 5s loop iteration.
-_pause_logged = False
 
-# Set to True whenever the DJ starts a new track. track_finished() skips its
-# URI check on that same loop iteration to avoid a false positive caused by
-# Spotify API lag (current_playback() still returns the old URI for ~1-2s).
-_just_played = False
+def status(value):
+    global _last_status
+    if value != _last_status:
+        print(f"DJ_STATUS:{value}")
+        _last_status = value
+
+
+def log_section(title):
+    print(f"\n--- {title} ---")
+
 
 track_disk_cache = {}
 
@@ -80,10 +81,6 @@ track_disk_cache = {}
 class RateLimitError(Exception):
     def __init__(self, retry_after):
         self.retry_after = retry_after
-
-# Artists that had no cache entry AND couldn't be fetched due to rate limiting.
-# They stay in their pools but are skipped during play until successfully fetched.
-uncached_artists = set()
 
 # Tracks when a rate limit ban expires so track_finished() can skip
 # API calls while banned rather than hammering the endpoint.
@@ -106,7 +103,7 @@ def save_track_cache():
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(track_disk_cache, f, indent=2)
 
-load_track_cache()
+# Startup loading is performed in main(), never on import.
 
 # =====================
 # FILTER SETTINGS
@@ -126,7 +123,7 @@ TRACK_KEYWORDS_SUBSTR = [
 ]
 
 ALBUM_KEYWORDS_WORD = [
-    "tour", "concert", "arena", "stadium", "festival", "anniversary", "soundtrack", "vocaloid",
+    "live", "tour", "concert", "arena", "stadium", "festival", "anniversary", "soundtrack", "vocaloid",
 ]
 
 LANGUAGE_VERSION_PATTERN = re.compile(
@@ -160,6 +157,8 @@ BLOCKED_ARTIST_IDS = {
 
 recent_titles  = deque(maxlen=30)
 recent_artists = deque(maxlen=10)
+# Spontaneous AI listening stays in process-local session history.
+ai_recent_titles = deque(maxlen=30)
 
 def load_recent():
     """Restore recent_titles from disk so repeats are avoided across restarts."""
@@ -182,7 +181,6 @@ def save_recent():
             "artists": list(recent_artists),
         }, f)
 
-load_recent()
 
 # =====================
 # BAN SYSTEM
@@ -211,8 +209,7 @@ def ban_current_track():
     Ban whatever is currently playing:
     1. Look up the current track via Spotify API
     2. Add its ID to banned_track_ids and save
-    3. Apply a weight penalty to the artist
-    4. Skip to the next track immediately
+    3. Skip to the next track immediately
     """
     try:
         pb = sp.current_playback()
@@ -232,10 +229,10 @@ def ban_current_track():
             print(f"  Banned: '{name}' (ID: {track_id})")
 
         # Skip immediately — play next track in current mode.
-        # interrupted=False because the weight penalty was already applied
-        # above; passing interrupted=True would cause judge_last_track()
-        # to apply it a second time.
-        if auto_mode == "global":
+        # Explicit track bans are neutral for artist weights.
+        if ai_pool:
+            play_artist(random.choice(ai_pool)[0], "ai", no_judge=True, interrupted=False, banned=True)
+        elif auto_mode == "global":
             play_global_mix(interrupted=False, banned=True)
         elif current_pool:
             play_from_pool(current_pool, auto_mode, interrupted=False, banned=True)
@@ -243,7 +240,6 @@ def ban_current_track():
     except Exception as e:
         print(f"  Ban failed: {e}")
 
-load_banned()
 
 # =====================
 # BAN ARTIST SYSTEM
@@ -319,53 +315,30 @@ def ban_current_artist():
     print(f"  '{artist}' permanently banned and removed from all pools.")
 
     # Skip to next track immediately
-    if auto_mode == "global":
+    if ai_pool:
+        play_artist(random.choice(ai_pool)[0], "ai", no_judge=True, interrupted=False, banned=True)
+    elif auto_mode == "global":
         play_global_mix(interrupted=False, banned=True)
     elif current_pool:
         play_from_pool(current_pool, auto_mode, interrupted=False, banned=True)
 
-load_banned_artists()
 
 # =====================
 # INSTANCE LOCK
 # =====================
 
-def acquire_lock():
-    """
-    Write our PID to the lock file. If a lock file already exists and the
-    PID in it belongs to a running process, exit immediately so we don't
-    run two instances at once. Works on both Windows and Linux.
-    """
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, "r") as f:
-                existing_pid = int(f.read().strip())
-            # Cross-platform process check using os.kill with signal 0
-            # signal 0 doesn't kill the process, just checks if it exists
-            os.kill(existing_pid, 0)
-            print(f"DJ is already running (PID {existing_pid}). Exiting.")
-            sys.exit(0)
-        except (ProcessLookupError, ValueError):
-            pass  # stale or unreadable lock — safe to overwrite
-        except PermissionError:
-            # Process exists but we can't signal it — treat as running
-            print(f"DJ appears to already be running. Exiting.")
-            sys.exit(0)
+_instance_lock = InstanceLock(LOCK_FILE)
 
-    with open(LOCK_FILE, "w") as f:
-        f.write(str(os.getpid()))
+
+def acquire_lock():
+    if not _instance_lock.acquire():
+        print("DJ is already running. Exiting.")
+        sys.exit(0)
+
 
 def release_lock():
-    """Remove the lock file on clean exit."""
-    try:
-        if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
-    except Exception:
-        pass
+    _instance_lock.release()
 
-import atexit
-acquire_lock()
-atexit.register(release_lock)
 
 # =====================
 # ARTISTS
@@ -427,7 +400,7 @@ def default_memory():
 
 def upgrade_memory(data):
     if "version" not in data:
-        return default_memory()
+        data["version"] = MEMORY_VERSION
     if data["version"] < MEMORY_VERSION:
         print("Upgrading DJ memory...")
         data["version"] = MEMORY_VERSION
@@ -507,12 +480,9 @@ def load_memory():
         apply_weight_decay(data)
         return data
     except Exception:
-        print("Memory corrupted, rebuilding...")
-        mem = default_memory()
-        save_memory(mem)
-        return mem
+        raise RuntimeError("Lerndaten nicht lesbar; Datei bleibt unveraendert.") from None
 
-memory = load_memory()
+memory = default_memory()
 
 def get_mode_memory(mode):
     return memory["modes"].setdefault(mode, {})
@@ -548,64 +518,13 @@ def update_weight(artist, mode, delta):
             queue_discovery(artist, mode)
 
 def judge_last_track(interrupted=False, mode_switch=False, banned=False):
-    """
-    Called before every new track starts. Judges whether the previous
-    track counts as completed or cut short, and updates weights.
-
-    interrupted=True  -- skip hotkey: always apply weight penalty
-    mode_switch=True  -- mode hotkey: no weight change at all
-    both False        -- natural end or track_finished: use progress fraction
-    """
-    artist = now_playing["artist"]
-    mode   = now_playing["mode"]
-
-    if not artist or not mode:
-        return
-
-    if mode_switch:
-        return  # switching modes is neutral -- no weight change
-
-    if banned:
-        return  # penalty already applied in ban_current_track -- skip judgement
-
-    if now_playing.get("is_ai_play"):
-        return  # AI mode plays are fully isolated from the weight system
-
-    if interrupted:
-        update_weight(artist, mode, WEIGHT_PUNISH)
-        return
-
-    duration = now_playing["duration"]
-    if duration == 0:
-        update_weight(artist, mode, WEIGHT_BOOST * 0.5)
-        return
-
-    # Use Spotify-reported progress_ms to judge how far the track got.
-    # If progress_ms is still 0, no poll ran before the track ended --
-    # we have no reliable data, so make no weight change rather than
-    # guessing with wall-clock time which can lie when paused.
-    progress = now_playing["progress_ms"]
-    if progress == 0:
-        return  # no data -- skip judgement entirely
-    fraction = progress / duration
-
-    if fraction >= 0.80:
-        update_weight(artist, mode, WEIGHT_BOOST)
-        if now_playing.get("is_trial"):
+    verdict = tracker.verdict(interrupted=interrupted, neutral=mode_switch or banned)
+    if verdict:
+        artist, mode = now_playing["artist"], now_playing["mode"]
+        update_weight(artist, mode, WEIGHT_BOOST if verdict == "positive" else WEIGHT_PUNISH)
+        if verdict == "positive" and now_playing.get("is_trial"):
             record_trial_play(artist)
-    elif fraction < 0.25:
-        update_weight(artist, mode, WEIGHT_PUNISH)
-    # 25–80%: ambiguous, no change
 
-def set_now_playing(artist, mode, duration_ms, uri=None):
-    global _just_played
-    now_playing["artist"]      = artist
-    now_playing["mode"]        = mode
-    now_playing["duration"]    = duration_ms
-    now_playing["started"]     = time.time()
-    now_playing["progress_ms"] = 0  # reset so previous track's value doesn't bleed in
-    now_playing["uri"]         = uri
-    _just_played               = True  # suppress track_finished() for this iteration
 
 # =====================
 # DISCOVERY SYSTEM
@@ -647,7 +566,7 @@ def save_discovered(data):
     with open(DISCOVERED_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-discovered_artists = load_discovered()
+discovered_artists = {}
 
 def all_known_ids():
     """Return a set of all artist IDs we already know about (permanent + discovered)."""
@@ -698,18 +617,15 @@ def run_pending_discoveries():
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_API_URL = "http://ws.audioscrobbler.com/2.0/"
 
-if not LASTFM_API_KEY:
-    raise RuntimeError(
-        "LASTFM_API_KEY is not set. Add it to your .env file.\n"
-        "Get a free key at: https://www.last.fm/api/account/create"
-    )
-
 def discover_new_artist(seed_artist, mode):
     """
     Use Last.fm's artist.getSimilar to find a new artist, then resolve
     their Spotify ID via sp.search(). Replaces the deprecated Spotify
     recommendations endpoint.
     """
+    if not LASTFM_API_KEY:
+        print("  Discovery unavailable: LASTFM_API_KEY not configured.")
+        return
     known_names = set(ARTISTS.keys()) | set(discovered_artists.keys())
 
     print(f"  Discovery: searching Last.fm for artists similar to {seed_artist}...")
@@ -833,79 +749,98 @@ def record_trial_play(artist):
 # SPOTIFY CONNECT
 # =====================
 
+def retry_seconds(error):
+    headers = getattr(error, "headers", None) or {}
+    try:
+        value = float(headers.get("Retry-After", 30))
+        return max(1, value) if math.isfinite(value) and value > 0 else 30
+    except (ValueError, TypeError):
+        return 30
+
+
+class SpotifyGateway:
+    """Share one cooldown across all Spotify endpoints; no SDK retry sleeps."""
+    def __init__(self, client):
+        self.client = client
+
+    def __getattr__(self, name):
+        method = getattr(self.client, name)
+        def call(*args, **kwargs):
+            global _rate_limit_until
+            if time.time() < _rate_limit_until:
+                raise RateLimitError(_rate_limit_until - time.time())
+            try:
+                return method(*args, **kwargs)
+            except spotipy.exceptions.SpotifyException as error:
+                if error.http_status == 429:
+                    wait = retry_seconds(error)
+                    _rate_limit_until = time.time() + wait
+                    status(f"Rate-Limit: {wait:.0f}s warten")
+                    raise RateLimitError(wait) from None
+                raise
+        return call
+
+
 def connect():
     auth_manager = SpotifyOAuth(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-        open_browser=False,
+        client_id=CLIENT_ID, client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI, scope=SCOPE, open_browser=False,
         cache_path=os.path.join(BASE_DIR, ".cache-dj"),
     )
-    sp = spotipy.Spotify(auth_manager=auth_manager, retries=0, backoff_factor=0)
-    for attempt in range(5):
-        if sp.devices().get("devices"):
-            return sp
-        print(f"No active Spotify device found (attempt {attempt + 1}/5). "
-              f"Open Spotify and start playing something, then wait...")
-        time.sleep(10)
-    raise RuntimeError(
-        "Could not find an active Spotify device after 5 attempts. "
-        "Make sure Spotify is open on at least one device."
-    )
+    return SpotifyGateway(spotipy.Spotify(
+        auth_manager=auth_manager, retries=0, status_retries=0,
+        backoff_factor=0, requests_timeout=8,
+    ))
+
+
+class DeviceUnavailable(Exception):
+    pass
+
 
 def get_active_device_id():
-    """
-    Resolve the currently active Spotify device fresh on every play call.
-    This means switching playback to a different device in Spotify is
-    respected immediately — the DJ never forces audio back to the device
-    that happened to be active at startup.
-    Returns None if no device is found (Spotify will use its own default).
-    """
-    try:
-        devices = sp.devices().get("devices", [])
-        if not devices:
-            return None
-        active = next((d for d in devices if d.get("is_active")), None)
-        chosen = active or devices[0]
-        if len(devices) > 1:
-            status = "active" if active else "fallback (none active)"
-            print(f"  Device: '{chosen['name']}' ({status})")
-        return chosen["id"]
-    except Exception:
-        return None
+    devices = sp.devices().get("devices", [])
+    preferred = os.getenv("SPOTIFY_DEVICE_NAME", "").strip()
+    if preferred:
+        chosen = next((d for d in devices if d.get("name", "").casefold() == preferred.casefold()
+                       and not d.get("is_restricted")), None)
+    else:
+        chosen = next((d for d in devices if d.get("is_active") and not d.get("is_restricted")), None)
+    if not chosen or not chosen.get("id"):
+        raise DeviceUnavailable("Spotify-Geraet nicht bereit; Spotify oeffnen oder Geraet aktivieren.")
+    return chosen["id"]
 
-sp = connect()
 
-# =====================
-# DEBUG MODE
-#
-# Windows CMD:        set DJ_DEBUG=1 && python spotify_dj.py
-# Windows PowerShell: $env:DJ_DEBUG="1"; python spotify_dj.py
-# =====================
-
+sp = None
 DEBUG_MODE = os.getenv("DJ_DEBUG", "0") == "1"
 
-def safe_play(**kwargs):
-    global sp, _rate_limit_until
 
+def safe_play(_device_id=None, **kwargs):
+    """Request once, then confirm the exact track and device in four polls."""
     if DEBUG_MODE:
-        print(f"[DEBUG] Would play: {kwargs}")
-        return
+        status("Debug: kein Playback angefordert")
+        return None
+    # Automatic transitions already have a just-confirmed owned device.
+    device_id = _device_id if _device_id is not None else get_active_device_id()
+    expected_uri = kwargs["offset"]["uri"]
+    status("Start angefordert; warte auf Spotify-Bestaetigung")
+    print("IS_PLAYING:false")
+    publish_progress(None)
+    sp.start_playback(device_id=device_id, **kwargs)
+    for delay in (1, 2, 2, 3):
+        time.sleep(delay)
+        try:
+            pb = sp.current_playback()
+        except RateLimitError:
+            raise
+        except Exception:
+            continue
+        if (pb and pb.get("is_playing") and (pb.get("item") or {}).get("uri") == expected_uri
+                and (pb.get("device") or {}).get("id") == device_id
+                and (pb.get("context") or {}).get("uri") == kwargs["context_uri"]):
+            return pb
+    status("Start nicht bestaetigt; neuer DJ-Befehl erforderlich")
+    return None
 
-    try:
-        sp.start_playback(device_id=get_active_device_id(), **kwargs)
-    except spotipy.exceptions.SpotifyException as e:
-        if e.http_status == 429:
-            wait = int(e.headers.get("Retry-After", 30)) if e.headers else 30
-            _rate_limit_until = time.time() + wait
-            print(f"Rate limit hit in safe_play. Waiting {wait}s...")
-            time.sleep(wait)
-            sp.start_playback(device_id=get_active_device_id(), **kwargs)
-            return
-        print(f"Playback error ({e.http_status}), reconnecting...")
-        sp = connect()
-        sp.start_playback(device_id=get_active_device_id(), **kwargs)
 
 # =====================
 # FILTER FUNCTIONS
@@ -916,7 +851,7 @@ def is_alternate_version(track):
     track_text = track_text.replace("–", "-").replace("_", " ").replace(".", " ")
     track_text = " ".join(track_text.split())
 
-    album_text = track["album"]["name"].lower()
+    album_text = (track.get("album") or {}).get("name", "").lower()
     album_text = album_text.replace("–", "-").replace("_", " ").replace(".", " ")
     album_text = " ".join(album_text.split())
 
@@ -969,76 +904,55 @@ def weighted_choice(pool, mode):
 artist_cache = {}
 
 def fetch_artist_tracks_by_id(artist_name, artist_id):
-    """
-    Fetch tracks for any artist given their name and Spotify ID.
-    Used by both get_artist_tracks (permanent artists) and the
-    discovery system (candidates we don't have in ARTISTS yet).
-    Results are cached to disk the same way as permanent artists.
-    """
-    # Check disk cache first
     entry = track_disk_cache.get(artist_name)
-    if entry:
-        age_days = (time.time() - entry["fetched_at"]) / 86400
-        if age_days < CACHE_TTL_DAYS:
+    if entry and (time.time() - entry.get("fetched_at", 0)) / 86400 < CACHE_TTL_DAYS:
+        if entry.get("catalog_version") == 2 or select_best_tracks(entry.get("tracks", [])):
             return entry["tracks"]
-
+        print(f"  {artist_name}: legacy cache has no eligible tracks; refreshing catalog.")
     if artist_name in artist_cache:
         return artist_cache[artist_name]
 
-    tracks = []
-    seen   = set()
-
-    try:
-        response = sp._get(
-            f"artists/{artist_id}/albums",
-            params={
-                "market":         "DE",
-                "include_groups": "album,single",
-                "limit":          50,
-            }
-        )
+    tracks, seen = [], set()
+    # Installed Spotipy's public method still sends 'country' and defaults to
+    # 20. Spotify now documents 'market' and a maximum of 10 albums per page.
+    # Pass flat kwargs: _get(params={...}) sends the wrong nested query key.
+    response = sp._get(f"artists/{artist_id}/albums",
+                       include_groups="album,single", market="DE", limit=10)
+    for page in range(20):
         for album in response.get("items", []):
-            if album["id"] in seen:
+            if album.get("id") in seen:
                 continue
-            seen.add(album["id"])
-            for t in sp.album_tracks(album["id"], limit=50)["items"]:
-                track_artist_ids = {a["id"] for a in t.get("artists", [])}
-                if artist_id not in track_artist_ids:
-                    continue
-                t["album"] = album
-                t.setdefault("popularity", 0)
-                t.setdefault("explicit", False)
-                tracks.append(t)
+            seen.add(album.get("id"))
+            # Avoid spending one request per live album when none of its tracks
+            # can pass our existing album filters.
+            if is_alternate_version({"name": "", "album": album}):
+                continue
+            track_page = sp.album_tracks(album["id"], limit=50, market="DE")
+            for track_page_number in range(20):
+                for item in track_page.get("items", []):
+                    if artist_id not in {a.get("id") for a in item.get("artists", [])}:
+                        continue
+                    t = dict(item, album=album)
+                    t.setdefault("popularity", 0)
+                    tracks.append(t)
+                if not track_page.get("next"):
+                    break
+                if track_page_number == 19:
+                    raise ValueError("Track pagination limit reached; cache preserved")
+                track_page = sp.next(track_page)
+        if not response.get("next"):
+            break
+        if page == 19:
+            raise ValueError("Album pagination limit reached; cache preserved")
+        response = sp.next(response)
+    # Publish only a complete fetch. Failures leave the old cache intact.
+    artist_cache[artist_name] = tracks
+    track_disk_cache[artist_name] = {
+        "fetched_at": time.time(), "tracks": tracks, "catalog_version": 2,
+    }
+    save_track_cache()
+    return tracks
 
-        artist_cache[artist_name] = tracks
-        track_disk_cache[artist_name] = {
-            "fetched_at": time.time(),
-            "tracks":     tracks,
-        }
-        save_track_cache()
-        return tracks
-
-    except Exception as e:
-        # Spotipy sometimes raises rate limit errors as SpotifyException with
-        # http_status 429, but can also surface them as a plain Exception with
-        # the message text below — catch both.
-        msg = str(e).lower()
-        is_rate_limit = (
-            (hasattr(e, "http_status") and e.http_status == 429) or
-            "rate" in msg or
-            "request limit" in msg or
-            "retry will occur" in msg
-        )
-        if is_rate_limit:
-            # Try to extract Retry-After from the message (e.g. "...after: 22347 s")
-            match = re.search(r"(\d+)\s*s", msg)
-            wait = int(match.group(1)) if match else (
-                int(e.headers.get("Retry-After", 30)) if hasattr(e, "headers") and e.headers else 30
-            )
-            print(f"  Rate limit hit fetching {artist_name}. Retry-After: {wait}s.")
-            raise RateLimitError(wait)
-        print(f"Track fetch failed for {artist_name}: {e}")
-        return []
 
 def get_artist_tracks(artist_name):
     """Fetch tracks for a permanent artist (looks up ID from ARTISTS dict)."""
@@ -1048,50 +962,7 @@ def get_artist_tracks(artist_name):
         # discovery that was later removed. Skip it cleanly instead of crashing.
         print(f"  {artist_name} not found in ARTISTS dict, skipping.")
         return []
-    try:
-        return fetch_artist_tracks_by_id(artist_name, artist_id)
-    except RateLimitError:
-        uncached_artists.add(artist_name)
-        print(f"  {artist_name} marked as uncached due to rate limit.")
-        return []
-
-# =====================
-# PREWARM CACHE
-# =====================
-
-def prewarm_cache(artist_names, delay=2.0):
-    """
-    Fetch and cache all artists at startup. After this runs,
-    get_artist_tracks() makes zero API calls for 7 days.
-
-    If a rate limit is hit mid-prewarm, stops early and marks the
-    remaining artists in uncached_artists so they're skipped during
-    play rather than causing a hang. They'll be retried on next startup
-    once the ban expires.
-    """
-    print("Pre-warming track cache...")
-    for name in artist_names:
-        entry = track_disk_cache.get(name)
-        if entry:
-            age_days = (time.time() - entry["fetched_at"]) / 86400
-            if age_days < CACHE_TTL_DAYS:
-                print(f"  ✓ {name} (cached)")
-                continue
-        print(f"  Fetching {name}...")
-        try:
-            get_artist_tracks(name)
-        except RateLimitError as e:
-            print(f"  Rate limited during prewarm (Retry-After: {e.retry_after}s).")
-            print(f"  Stopping prewarm early — cached artists will play normally.")
-            # Mark this artist and all remaining ones as uncached
-            remaining = artist_names[artist_names.index(name):]
-            for skipped in remaining:
-                if not track_disk_cache.get(skipped):
-                    uncached_artists.add(skipped)
-                    print(f"  ⚠ {skipped} (uncached — will be skipped until fetched)")
-            break
-        time.sleep(delay + random.uniform(0, 1.5))
-    print("Cache ready.\n")
+    return fetch_artist_tracks_by_id(artist_name, artist_id)
 
 # =====================
 # TRACK SELECTION
@@ -1100,25 +971,35 @@ def prewarm_cache(artist_names, delay=2.0):
 def select_best_tracks(tracks):
     grouped = {}
     for t in tracks:
-        if t["album"]["album_type"] in ["compilation", "appears_on"]:
+        if not isinstance(t, dict):
             continue
-        if any(w in t["album"]["name"].lower() for w in
-               ALBUM_KEYWORDS_WORD + ALBUM_KEYWORDS_SUBSTR):
+        album = t.get("album") or {}
+        if not isinstance(album, dict):
             continue
+        album_uri, track_uri = album.get("uri"), t.get("uri")
+        if not (isinstance(album_uri, str) and isinstance(track_uri, str)
+                and re.fullmatch(r"spotify:album:[A-Za-z0-9]+", album_uri)
+                and re.fullmatch(r"spotify:track:[A-Za-z0-9]+", track_uri)
+                and isinstance(t.get("name"), str) and isinstance(album.get("name"), str)):
+            continue
+        if album.get("album_type") in ["compilation", "appears_on"]:
+            continue
+        # Word boundaries are handled by is_alternate_version. Substring
+        # matching the word 'live' would also reject a studio album 'Believe'.
         if is_alternate_version(t):
             continue
 
-        track_artist_ids = {a["id"] for a in t.get("artists", [])}
+        track_artist_ids = {a.get("id") for a in t.get("artists", [])}
         if track_artist_ids & BLOCKED_ARTIST_IDS:
             continue
 
         # Skip tracks shorter than 90 seconds (intros, skits, talking tracks)
-        if t.get("duration_ms", 0) < 90000:
+        if not isinstance(t.get("duration_ms"), (int, float)) or t["duration_ms"] < 90000:
             continue
 
         title     = normalize_title(t["name"])
         score_new = (1 if t.get("explicit", False) else 0) * 3 \
-                  + (1 if t["album"]["album_type"] == "single" else 0) * 2 \
+                  + (1 if t["album"].get("album_type") == "single" else 0) * 2 \
                   + t.get("popularity", 0)
 
         if title not in grouped:
@@ -1135,208 +1016,301 @@ def select_best_tracks(tracks):
 # PLAY FUNCTIONS
 # =====================
 
-def play_artist(name, mode, pool=None, _depth=0, interrupted=True, mode_switch=False, banned=False, no_judge=False):
-    max_depth = len(pool) if pool else 1
-    if _depth >= max_depth:
-        print("  All artists in pool exhausted, skipping this cycle.")
-        return
-
-    # Before doing anything else, judge the previous track and
-    # process any pending discovery searches.
-    if _depth == 0:
-        if not no_judge:
-            judge_last_track(interrupted=interrupted, mode_switch=mode_switch, banned=banned)
-        run_pending_discoveries()
-
-    # Skip artists that have no cache and couldn't be fetched at startup
-    # due to rate limiting. Try another artist from the pool instead.
-    if name in uncached_artists:
-        print(f"  Skipping {name} (uncached, rate limited at startup)")
-        if pool:
-            candidates = [a for a in pool if a != name and a not in uncached_artists]
-            if candidates:
-                play_artist(random.choice(candidates), mode, pool,
-                            _depth=_depth + 1, interrupted=interrupted)
-            else:
-                print("  All pool artists are uncached, nothing to play.")
-        return
-
-    print(f"DJ -> {name}")
-    time.sleep(1)
-
-    tracks = []
-    try:
-        tracks = get_artist_tracks(name)
-        print(f"  fetched: {len(tracks)}")
-
-        tracks = select_best_tracks(tracks)
-        print(f"  after filter: {len(tracks)}")
-
-        # Note: explicit preference is already handled in select_best_tracks()
-        # scoring (+3 points). Filtering the whole pool to explicit-only here
-        # breaks artists like BLACKPINK who rarely release explicit tracks.
-
-        tracks = [t for t in tracks if normalize_title(t["name"]) not in recent_titles]
-        print(f"  after recent filter: {len(tracks)}")
-
-        tracks = [t for t in tracks if t.get("id") not in banned_track_ids]
-        print(f"  after ban filter: {len(tracks)}")
-
-        if not tracks:
-            raise Exception("No tracks left after filtering")
-
-        chosen = random.choice(tracks)
-
-        # Build co-artist suffix only if not already mentioned in track name
-        track_name_lower = chosen["name"].lower()
-        features_in_title = any(kw in track_name_lower for kw in ["feat", "ft.", "with "])
-        if len(chosen["artists"]) > 1 and not features_in_title:
-            co_artists = ", ".join(a["name"] for a in chosen["artists"][1:])
-            print(f"  {name} — {chosen['name']} (ft. {co_artists})")
-        else:
-            print(f"  {name} — {chosen['name']}")
-        
+def start_selected(name, mode, chosen, no_judge, device_id=None):
+    global _prepared_next
+    _prepared_next = None
+    pb = safe_play(
+        _device_id=device_id,
+        context_uri=chosen["album"]["uri"],
+        offset={"uri": chosen["uri"]}, position_ms=0,
+    )
+    if not pb:
+        tracker.control = False
+        return False
+    tracker.start(name, mode, chosen, pb, time.monotonic(), ai=no_judge,
+                  trial=name in discovered_artists and not discovered_artists[name].get("graduated", False))
+    if no_judge:
+        ai_recent_titles.append(normalize_title(chosen["name"]))
+    else:
         recent_titles.append(normalize_title(chosen["name"]))
-        recent_artists.append(chosen["artists"][0]["name"])
+        recent_artists.append(name)
         save_recent()
+    log_section("Neuer Song")
+    print(f"{'Global DJ' if mode == 'global' else 'DJ'} -> {name}")
+    print(f"  {name} — {chosen['name']}")
+    print(f"CURRENT_ARTIST:{name}")
+    print(f"NOW_PLAYING:{chosen['name']}")
+    print("IS_PLAYING:true")
+    publish_progress(pb)
+    status("DJ aktiv")
+    if not no_judge:
+        # Discovery must not delay the outgoing song's critical end window.
+        run_pending_discoveries()
+    return True
 
-        safe_play(uris=[chosen["uri"]])
-        print(f"NOW_PLAYING:{chosen['name']}")
-        print("IS_PLAYING:true")
 
-        # Record what's now playing for weight judgement next time
-        set_now_playing(
-            artist      = name,
-            mode        = mode,
-            duration_ms = chosen.get("duration_ms", 0),
-            uri         = chosen.get("uri"),
-        )
-        now_playing["is_ai_play"] = no_judge  # track whether this was an AI mode play
+def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, banned=False, no_judge=False):
+    global _pending_selection, _next_device_check, _prepared_next
+    _pending_selection = None
+    _prepared_next = None
+    if mode_switch and not no_judge:
+        label = {"american_rap": "American Rap", "german_trap": "German Trap",
+                 "kpop": "K-Pop", "jpop": "J-Pop", "global": "Global"}.get(mode, mode)
+        log_section(f"Modus: {label}")
+    print(f"MODE:{'AI' if no_judge else mode}")
+    # Refresh before explicit skips, so a manual switch/device change cannot
+    # accidentally penalize the formerly owned artist.
+    if interrupted and not mode_switch and tracker.control:
+        track_finished()
+    judge_last_track(interrupted=interrupted,
+                     mode_switch=mode_switch or no_judge or not tracker.control, banned=banned)
+    tracker.control = False
+    publish_progress(None)
+    if now_playing:
+        now_playing["confirmed"] = False
+    # An AI fallback is always restricted to the active request, irrespective
+    # of a caller passing the global pool. Each artist is tried at most once.
+    allowed = [n for n, _ in ai_pool] if no_judge else list(pool or [name])
+    candidates = ([name] if name in allowed else []) + [n for n in allowed if n != name]
+    candidates = list(dict.fromkeys(candidates))
+    for candidate in candidates:
+        try:
+            tracks = get_artist_tracks(candidate)
+            filtered = select_best_tracks(tracks)
+            print(f"  {candidate}: fetched={len(tracks)}, eligible={len(filtered)}")
+            available = [t for t in filtered if t.get("id") not in banned_track_ids
+                         and normalize_title(t["name"]) not in recent_titles
+                         and normalize_title(t["name"]) not in ai_recent_titles]
+            if not available:
+                print(f"  {candidate}: keine passenden, nicht kuerzlich gehoerten Tracks.")
+                continue
+            chosen = random.choice(available)
+            try:
+                return start_selected(candidate, mode, chosen, no_judge)
+            except DeviceUnavailable:
+                _pending_selection = (candidate, mode, chosen, no_judge)
+                _next_device_check = time.monotonic() + 15
+                status("Warte auf Spotify-Geraet; erneute Pruefung in 15s")
+                print("IS_PLAYING:false")
+                return False
+        except RateLimitError:
+            status("Spotify Rate-Limit; nach Wartezeit mit DJ-Befehl fortsetzen")
+            return False
+        except Exception as error:
+            # A playback failure must not silently start a different artist.
+            status(f"Spotify-Fehler ({type(error).__name__}); neuer DJ-Befehl erforderlich")
+            print("IS_PLAYING:false")
+            return False
+    status("Keine passenden Tracks im angefragten Pool; neuer DJ-Befehl erforderlich")
+    print("IS_PLAYING:false")
+    return False
 
-        # If this is a trial artist, check if they earned a trial play
-        # (We check fraction >= 0.80 lazily on next track via judge_last_track,
-        # so here we just hook into that via a flag in now_playing)
-        now_playing["is_trial"] = (
-            name in discovered_artists and
-            not discovered_artists[name].get("graduated", False)
-        )
 
-    except Exception as e:
-        print(f"  play_artist failed: {e}")
-        if pool:
-            candidates = [a for a in pool if a != name]
-            if candidates:
-                play_artist(random.choice(candidates), mode, pool,
-                            _depth=_depth + 1, interrupted=False)
-        else:
-            time.sleep(2)
+def service_pending_start():
+    global _pending_selection, _next_device_check
+    if not _pending_selection or time.monotonic() < _next_device_check or time.time() < _rate_limit_until:
+        return
+    args = _pending_selection
+    _next_device_check = time.monotonic() + 15
+    try:
+        start_selected(*args)
+        _pending_selection = None
+    except DeviceUnavailable:
+        pass  # A waiting state, not repeated start_playback requests.
+    except RateLimitError:
+        _pending_selection = None
+        status("Rate-Limit beim Start; nach Wartezeit neuen DJ-Befehl senden")
+    except Exception as error:
+        _pending_selection = None
+        status(f"Startfehler ({type(error).__name__}); neuer DJ-Befehl erforderlich")
+
+
+def publish_progress(pb):
+    """Display-only telemetry from an existing API response; never learning input."""
+    item = (pb or {}).get("item") or {}
+    position, duration = (pb or {}).get("progress_ms"), item.get("duration_ms")
+    sample = None
+    if (item.get("uri") and isinstance(position, (int, float)) and math.isfinite(position)
+            and position >= 0 and isinstance(duration, (int, float))
+            and math.isfinite(duration) and duration > 0):
+        sample = dict(uri=item["uri"], progress_ms=min(position, duration),
+                      duration_ms=duration, is_playing=bool(pb.get("is_playing")))
+    print("PLAYBACK_PROGRESS:" + json.dumps(sample, ensure_ascii=False))
+
+
+def publish_playback(pb):
+    if pb and pb.get("item"):
+        print(f"NOW_PLAYING:{pb['item'].get('name', '—')}")
+        print(f"CURRENT_ARTIST:{', '.join(a.get('name', '') for a in pb['item'].get('artists', []))}")
+    else:
+        print("NOW_PLAYING:—")
+        print("CURRENT_ARTIST:—")
+    print(f"IS_PLAYING:{str(bool(pb and pb.get('is_playing') and pb.get('item'))).lower()}")
+    publish_progress(pb)
+
+
+def observe_external_playback():
+    """Keep the dashboard current after release, without reclaiming control."""
+    global _next_external_poll
+    if (tracker.control or _pending_selection or not auto_mode
+            or time.monotonic() < _next_external_poll or time.time() < _rate_limit_until):
+        return
+    _next_external_poll = time.monotonic() + 15
+    try:
+        publish_playback(sp.current_playback())
+    except Exception:
+        publish_playback(None)
+
 
 def play_from_pool(pool, mode, interrupted=True, mode_switch=False, banned=False):
     play_artist(weighted_choice(pool, mode), mode, pool, interrupted=interrupted, mode_switch=mode_switch, banned=banned)
 
 def play_global_mix(interrupted=True, mode_switch=False, banned=False):
     artist = weighted_choice(GLOBAL_POOL, "global")
-    print(f"Global DJ -> {artist}")
     play_artist(artist, "global", GLOBAL_POOL, interrupted=interrupted, mode_switch=mode_switch, banned=banned)
+
+
+def active_request():
+    if auto_mode == "ai":
+        return "ai", tuple(n for n, _ in ai_pool), True
+    if auto_mode == "global":
+        return "global", tuple(GLOBAL_POOL), False
+    return auto_mode, tuple(current_pool or ()), False
+
+
+def prepared_next_is_current():
+    return bool(_prepared_next and _prepared_next["owner"] == now_playing.get("generation")
+                and _prepared_next["request"] == active_request())
+
+
+def prepare_next_track():
+    """Select once from available caches; never perform I/O in the end window."""
+    global _prepared_next
+    t = now_playing
+    if (not tracker.control or not t.get("confirmed") or not t.get("playing")
+            or t.get("preparation_attempted")
+            or not 0 <= t["duration"] - t["progress_ms"] <= PREPARE_LEAD_MS):
+        return
+    t["preparation_attempted"] = True
+    request = active_request()
+    mode, pool, ai = request
+    if not pool or mode != t["mode"] or ai != t["is_ai_play"]:
+        return
+    first = random.choice(pool) if ai else weighted_choice(pool, mode)
+    for name in dict.fromkeys((first,) + pool):
+        if name in banned_artist_names:
+            continue
+        tracks = artist_cache.get(name)
+        if tracks is None:
+            entry = track_disk_cache.get(name, {})
+            tracks = (entry.get("tracks", []) if
+                      (time.time() - entry.get("fetched_at", 0)) / 86400 < CACHE_TTL_DAYS else [])
+        available = [t for t in select_best_tracks(tracks)
+                     if t.get("id") not in banned_track_ids
+                     and normalize_title(t["name"]) not in recent_titles
+                     and normalize_title(t["name"]) not in ai_recent_titles]
+        if available:
+            _prepared_next = dict(owner=now_playing["generation"], request=request,
+                                  selection=(name, mode, random.choice(available), ai))
+            return
+
+
+def advance_to_next_track():
+    global _prepared_next
+    if prepared_next_is_current():
+        selection = _prepared_next["selection"]
+        _prepared_next = None
+        tracker.control = False
+        chosen = selection[2]
+        if (chosen.get("id") in banned_track_ids or selection[0] in banned_artist_names
+                or normalize_title(chosen["name"]) in recent_titles
+                or normalize_title(chosen["name"]) in ai_recent_titles):
+            status("Vorbereiteter Titel nicht mehr gueltig; neuer DJ-Befehl erforderlich")
+            return
+        try:
+            start_selected(*selection, device_id=now_playing["device_id"])
+        except RateLimitError:
+            status("Rate-Limit beim Uebergang; nach Wartezeit neuen DJ-Befehl senden")
+        except Exception as error:
+            status(f"Uebergang fehlgeschlagen ({type(error).__name__}); neuer DJ-Befehl erforderlich")
+            publish_playback(None)
+        return  # A failed start must never trigger a second fallback start.
+    _prepared_next = None
+    if ai_pool:
+        play_artist(random.choice(ai_pool)[0], "ai", no_judge=True, interrupted=False)
+    elif auto_mode == "global":
+        play_global_mix(interrupted=False)
+    elif current_pool:
+        play_from_pool(current_pool, auto_mode, interrupted=False)
+
+
+def playback_poll_interval():
+    t = now_playing
+    if (prepared_next_is_current() and tracker.control and t.get("confirmed") and t.get("playing")
+            and t.get("sampled_at") is not None and t.get("stable_since") is not None
+            and time.monotonic() - t["stable_since"] >= 3
+            and t["listened_ms"] >= t["duration"] * .80):
+        age = max(0, time.monotonic() - t["sampled_at"])
+        remaining = (t["duration"] - t["progress_ms"] - TRANSITION_LEAD_MS) / 1000 - age
+        return max(.25, min(5, remaining))
+    return 5
 
 # =====================
 # TRANSITION CHECK
 # =====================
 
-# Fraction of track that must have played before the DJ considers it finished.
-# Stops a manual pause from being mistaken for a natural track end.
-# 0.85 = track must have reached at least 85% before the DJ auto-advances.
-TRACK_COMPLETE_THRESHOLD = 0.85
-
-
-def track_finished():
-    """
-    Returns True when the DJ should advance to the next track.
-
-    Two cases:
-    1. Spotify moved to a different track on its own (URI changed) — this
-       happens when a track ends naturally and Spotify auto-advances. The DJ
-       takes over immediately regardless of repeat/loop state.
-    2. Spotify stopped playing entirely AND the track had reached 85%+ —
-       covers edge cases where Spotify pauses at the end instead of advancing.
-
-    Manual pauses are ignored: if the URI hasn't changed and progress is below
-    85%, the DJ waits for the user to resume.
-    """
-    global _pause_logged, _just_played, _rate_limit_until
-    if not auto_mode or not now_playing["uri"]:
+def track_finished(allow_early=False):
+    global _prepared_next
+    if not tracker.control or not now_playing.get("confirmed"):
         return False
-    # Skip all API calls while rate limited
     if time.time() < _rate_limit_until:
-        return False
-    # Skip the URI check on the same loop iteration the DJ just started a track.
-    # Spotify API lag means current_playback() still reports the old URI for
-    # ~1-2 seconds, which would cause an immediate false-positive.
-    if _just_played:
-        _just_played = False
+        tracker.gap()
+        publish_progress(None)
         return False
     try:
         pb = sp.current_playback()
-        if not pb:
-            # No playback data — emit paused state so dashboard updates
-            if not _pause_logged:
-                print("IS_PLAYING:false")
-                _pause_logged = True
-            return False
-
-        current_uri = pb.get("item", {}).get("uri") if pb.get("item") else None
-
-        if pb.get("is_playing"):
-            now_playing["progress_ms"] = pb["progress_ms"]
-            if _pause_logged:
-                print("  Playback resumed.")
-                print("IS_PLAYING:true")
-                _pause_logged = False
-
-            _just_played = False
-            # If Spotify moved to a different track, the DJ should take over
-            if current_uri and current_uri != now_playing["uri"]:
-                print(f"  Spotify advanced to a new track — DJ taking over.")
-                return True
-            return False
-
-        # Spotify is not playing — check if the URI changed (track ended)
-        if current_uri and current_uri != now_playing["uri"]:
-            print(f"  Track ended and Spotify advanced — DJ taking over.")
-            return True
-
-        # Spotify stopped on the same track — could be a manual pause
-        duration = now_playing["duration"]
-        progress = now_playing["progress_ms"]
-        if duration == 0 or progress == 0:
-            if not _pause_logged:
-                print("IS_PLAYING:false")
-                _pause_logged = True
-            return False
-        fraction = progress / duration
-        if fraction < TRACK_COMPLETE_THRESHOLD:
-            if not _pause_logged:
-                print(f"  Paused at {progress / 1000:.0f}s / {duration / 1000:.0f}s "
-                      f"({fraction * 100:.0f}%) -- waiting for manual resume.")
-                _pause_logged = True
-                print("IS_PLAYING:false")
-            return False
+    except Exception as error:
+        tracker.gap()
+        status("Rate-Limit; Playback unbekannt" if isinstance(error, RateLimitError)
+               else "Playback-Daten voruebergehend unbekannt")
+        print("IS_PLAYING:false")
+        publish_progress(None)
+        return False
+    event = tracker.observe(pb, time.monotonic())
+    early = False
+    if event == "playing" and allow_early:
+        prepare_next_track()
+        early = (prepared_next_is_current()
+                 and (pb.get("context") or {}).get("uri") == now_playing["album_uri"]
+                 and tracker.can_finish_early(time.monotonic(), TRANSITION_LEAD_MS))
+    if event == "finished" or early:
+        if early:
+            print("Track near end -- prepared DJ transition")
+        judge_last_track()
+        now_playing["confirmed"] = False
+        publish_progress(None)
         return True
-    except spotipy.exceptions.SpotifyException as e:
-        if e.http_status == 429:
-            wait = int(e.headers.get("Retry-After", 30)) if e.headers else 30
-            _rate_limit_until = time.time() + wait
-            print(f"  Rate limit in track_finished(). Pausing polls for {wait}s.")
-        return False
-    except Exception:
-        return False
+    if event == "manual":
+        _prepared_next = None
+        judge_last_track(mode_switch=True)
+        now_playing["confirmed"] = False
+        status("Manueller oder unklarer Wechsel; DJ freigegeben bis zum naechsten DJ-Befehl")
+    elif event == "paused":
+        status("Pausiert; auf Fortsetzen in Spotify warten")
+    elif event == "unknown":
+        status("Playback-Daten fehlen; keine Bewertung und kein Neustart")
+    elif event == "playing":
+        status("DJ aktiv")
+    publish_playback(pb)
+    return False
+
 
 # =====================
 # MAIN DJ LOOP
 # =====================
 
 def run_dj():
-    global current_pool, auto_mode
+    global current_pool, auto_mode, _pending_selection, _prepared_next
 
     while True:
         if os.path.exists(INPUT_FILE):
@@ -1353,19 +1327,22 @@ def run_dj():
                 sys.exit(0)
 
             elif choice == "skip":
+                log_section("Skip")
                 print("Skip hotkey -- playing next track.")
                 if ai_pool:
                     name, artist_id = random.choice(ai_pool)
-                    play_artist(name, "global", GLOBAL_POOL, interrupted=True, no_judge=True)
+                    play_artist(name, "ai", [n for n, _ in ai_pool], interrupted=True, no_judge=True)
                 elif auto_mode == "global":
                     play_global_mix(interrupted=True)
                 elif current_pool:
                     play_from_pool(current_pool, auto_mode, interrupted=True)
 
             elif choice == "ban":
+                log_section("Song sperren")
                 ban_current_track()
 
             elif choice == "ban-artist":
+                log_section("Kuenstler sperren")
                 ban_current_artist()
 
             elif choice == "1":
@@ -1400,6 +1377,17 @@ def run_dj():
                 play_global_mix(mode_switch=True)
 
             elif choice.startswith("ai:"):
+                log_section("AI-Anfrage")
+                _pending_selection = None
+                _prepared_next = None
+                auto_mode = "ai"
+                current_pool = None
+                judge_last_track(mode_switch=True)
+                tracker.control = False
+                if now_playing:
+                    now_playing["confirmed"] = False
+                ai_pool.clear()
+                ai_artists.clear()
                 user_request = choice[3:].strip()
                 if not user_request:
                     print("  AI: empty request, ignoring.")
@@ -1417,82 +1405,61 @@ def run_dj():
 
                         resolved = resolve_artists_to_ids(sp, artist_names, all_artists)
                         if not resolved:
-                            print("  AI: no artists could be resolved, ignoring.")
+                            status("AI: keine angefragten Kuenstler gefunden; neuer DJ-Befehl erforderlich")
                         else:
                             # Store as the active AI pool and start playing
                             ai_pool.clear()
                             ai_artists.clear()
                             ai_pool.extend(resolved)
 
-                            # Add any brand-new artists to ai_artists and
-                            # prewarm their track cache with delays to avoid
-                            # triggering Spotify's rate limit ban.
+                            # Temporary lookup only; no preference/pool changes.
                             for name, artist_id in resolved:
                                 if name not in ARTISTS and name not in discovered_artists:
                                     ai_artists[name] = artist_id
                                     print(f"  AI: registered temporary artist '{name}'")
                             
-                            uncached = [
-                                (name, artist_id) for name, artist_id in resolved
-                                if name not in track_disk_cache or
-                                (time.time() - track_disk_cache[name]["fetched_at"]) / 86400 >= CACHE_TTL_DAYS
-                            ]
-                            if uncached:
-                                print(f"  AI: pre-fetching {len(uncached)} uncached artist(s)...")
-                                for name, artist_id in uncached:
-                                    print(f"  AI: fetching {name}...")
-                                    try:
-                                        fetch_artist_tracks_by_id(name, artist_id)
-                                    except RateLimitError as e:
-                                        print(f"  AI: rate limited fetching {name}, skipping remaining.")
-                                        break
-                                    time.sleep(2 + random.uniform(0, 1.5))
-
                             name, artist_id = random.choice(ai_pool)
-                            auto_mode    = "global"
+                            auto_mode    = "ai"
                             current_pool = None
-                            play_artist(name, "global", GLOBAL_POOL, interrupted=True, no_judge=True)
+                            play_artist(name, "ai", [n for n, _ in ai_pool], interrupted=False, mode_switch=True, no_judge=True)
 
                     except Exception as e:
-                        print(f"  AI request failed: {e}")
+                        status(f"AI-Anfrage fehlgeschlagen ({type(e).__name__}); neuer DJ-Befehl erforderlich")
 
             # Clear ai_pool when any mode hotkey is pressed (1-5)
 
-        # Resume when the current track has naturally finished.
-        # track_finished() only returns True when progress reached 85%+
-        # before stopping, so manual pauses are never mistaken for track ends.
-        if track_finished():
-            print("Track finished -- playing next")
-            if ai_pool:
-                # AI mode: pick from the AI-suggested pool
-                name, artist_id = random.choice(ai_pool)
-                play_artist(name, "global", GLOBAL_POOL, interrupted=False, no_judge=True)
-            elif auto_mode == "global":
-                play_global_mix(interrupted=False)
-            elif current_pool:
-                play_from_pool(current_pool, auto_mode, interrupted=False)
+        # A fresh owned sample permits the agreed 1.5s early transition.
+        service_pending_start()
+        observe_external_playback()
+        if track_finished(allow_early=True):
+            advance_to_next_track()
 
-        time.sleep(5)
+        time.sleep(playback_poll_interval())
 
-# =====================
-# STARTUP
-# =====================
+def main():
+    global sp, memory, discovered_artists
+    import atexit
+    acquire_lock()
+    atexit.register(release_lock)
+    load_track_cache()
+    load_recent()
+    load_banned()
+    load_banned_artists()
+    memory = load_memory()
+    discovered_artists = load_discovered()
+    inject_discovered_into_pools()
+    sp = connect()
+    status("Bereit; Modus waehlen. Spotify darf beim Autostart noch geschlossen sein.")
+    # Fetch catalogs on demand rather than flooding Spotify at Windows startup.
+    while True:
+        try:
+            run_dj()
+        except Exception as error:
+            tracker.gap()
+            tracker.control = False
+            status(f"DJ-Fehler ({type(error).__name__}); auf neuen DJ-Befehl warten")
+            time.sleep(5)
 
-# Load previously discovered artists into pools before prewarming,
-# so their tracks get cached alongside permanent artists.
-inject_discovered_into_pools()
-prewarm_cache(GLOBAL_POOL)
 
-# =====================
-# CRASH SAFE RUNNER
-# =====================
-
-while True:
-    try:
-        run_dj()
-    except Exception:
-        CRASH_LOG = os.path.join(BASE_DIR, "data", "dj_crash.log")
-        with open(CRASH_LOG, "a", encoding="utf-8") as log:
-            log.write(f"\n\n[{datetime.datetime.now()}]\n")
-            log.write(traceback.format_exc())
-        time.sleep(5)
+if __name__ == "__main__":
+    main()

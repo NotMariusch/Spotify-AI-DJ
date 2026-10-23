@@ -7,6 +7,9 @@ data/dj_memory.json
 data/recent_tracks.json
 data/discovered_artists.json
 data/dj.lock
+data/server.lock
+data/voice.lock
+data/voice.log
 data/dj_input.txt
 data/dj_crash.log
 data/banned_tracks.json

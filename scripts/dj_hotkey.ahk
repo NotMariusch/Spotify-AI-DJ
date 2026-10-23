@@ -1,7 +1,9 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 
-DJ_PATH := "C:\Users\mariu\SpotifyDJ\data\dj_input.txt"
+RControl::F13
+
+DJ_PATH := A_ScriptDir "\..\data\dj_input.txt"
 
 SendDJ(value)
 {

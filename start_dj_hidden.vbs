@@ -1,23 +1,21 @@
+Option Explicit
+
+Dim WshShell, fso, baseDir, lockFile, f, pid, wmi, procs
+
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
-lockFile = "C:\Users\mariu\SpotifyDJ\data\dj.lock"
+baseDir = fso.GetParentFolderName(WScript.ScriptFullName)
+WshShell.CurrentDirectory = baseDir
 
-If fso.FileExists(lockFile) Then
-    Set f = fso.OpenTextFile(lockFile, 1)
-    pid = Trim(f.ReadLine())
-    f.Close
+' Instance protection is handled atomically by the Python server and DJ.
 
-    Set wmi = GetObject("winmgmts://./root/cimv2")
-    Set procs = wmi.ExecQuery("SELECT * FROM Win32_Process WHERE ProcessId=" & pid)
-
-    If procs.Count > 0 Then
-        MsgBox "Spotify DJ is already running (PID " & pid & ").", 64, "Spotify DJ"
-        WScript.Quit
-    End If
+If Not fso.FileExists(baseDir & "\start_dj.bat") Then
+    MsgBox "Cannot find start_dj.bat in " & baseDir, 16, "Spotify DJ"
+    WScript.Quit 1
 End If
 
-WshShell.Run """C:\Users\mariu\SpotifyDJ\start_dj.bat""", 0
+WshShell.Run Chr(34) & baseDir & "\start_dj.bat" & Chr(34), 0, False
 
 Set WshShell = Nothing
 Set fso = Nothing

@@ -20,10 +20,14 @@ import threading
 import queue
 import time
 import re
+import socket
+import json
+import math
 from dotenv import load_dotenv
 from pathlib import Path
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
+from instance_lock import InstanceLock
 
 BASE_DIR   = Path(__file__).resolve().parent.parent
 INPUT_FILE = BASE_DIR / "data" / "dj_input.txt"
@@ -44,6 +48,8 @@ state = {
     "mode":           "—",
     "recording":      False,
     "is_playing":     False,
+    "status":         "Warte auf DJ",
+    "playback_progress": None,
 }
 
 dj_process = None
@@ -54,9 +60,31 @@ def parse_dj_line(line: str):
     line = line.strip()
     if not line:
         return
-    m = re.match(r"^(?:Global )?DJ -> (.+)$", line)
-    if m:
-        state["current_artist"] = m.group(1).strip()
+    if line.startswith("PLAYBACK_PROGRESS:"):
+        try:
+            sample = json.loads(line[len("PLAYBACK_PROGRESS:"):])
+            valid = (isinstance(sample, dict) and isinstance(sample.get("uri"), str)
+                     and isinstance(sample.get("progress_ms"), (int, float))
+                     and math.isfinite(sample["progress_ms"]) and sample["progress_ms"] >= 0
+                     and isinstance(sample.get("duration_ms"), (int, float))
+                     and math.isfinite(sample["duration_ms"]) and sample["duration_ms"] > 0
+                     and isinstance(sample.get("is_playing"), bool))
+            state["playback_progress"] = dict(
+                uri=sample["uri"], progress_ms=min(sample["progress_ms"], sample["duration_ms"]),
+                duration_ms=sample["duration_ms"], is_playing=sample["is_playing"],
+                sample_id=time.monotonic_ns(), received_at=time.monotonic(),
+            ) if valid else None
+        except (ValueError, TypeError):
+            state["playback_progress"] = None
+        return
+    if line.startswith("CURRENT_ARTIST:"):
+        state["current_artist"] = line[len("CURRENT_ARTIST:"):]
+    if line.startswith("DJ_STATUS:"):
+        state["status"] = line[len("DJ_STATUS:"):]
+    if line.startswith("MODE:"):
+        mode = line[len("MODE:"):]
+        state["mode"] = {"american_rap": "American Rap", "german_trap": "German Trap",
+                         "kpop": "K-Pop", "jpop": "J-Pop", "global": "Global"}.get(mode, mode)
     if re.search(r"AI request:", line):
         state["current_artist"] = "AI Mode"
         state["mode"] = "AI"
@@ -64,6 +92,23 @@ def parse_dj_line(line: str):
         state["current_track"] = line[len("NOW_PLAYING:"):]
     if line.startswith("IS_PLAYING:"):
         state["is_playing"] = line[len("IS_PLAYING:"):] == "true"
+
+
+def handle_dj_line(line: str):
+    """Update dashboard state without exposing its wire protocol as log spam."""
+    line = line.strip()
+    if not line:
+        return
+    parse_dj_line(line)
+    if line.startswith("DJ_STATUS:"):
+        message = line[len("DJ_STATUS:"):]
+        # Routine activity is visible in the status header and track display.
+        if message in ("DJ aktiv", "Start angefordert; warte auf Spotify-Bestaetigung"):
+            return
+        line = message
+    elif line.startswith(("NOW_PLAYING:", "IS_PLAYING:", "CURRENT_ARTIST:", "MODE:", "PLAYBACK_PROGRESS:")):
+        return
+    dj_log_queue.put(line)
 
 
 def launch_dj():
@@ -89,17 +134,26 @@ def launch_dj():
 
     def reader():
         for line in dj_process.stdout:
-            line = line.rstrip("\n")
-            parse_dj_line(line)
-            if not line.startswith(("NOW_PLAYING:", "IS_PLAYING:")):
-                dj_log_queue.put(line)
+            handle_dj_line(line)
         dj_process.wait()
+        state.update(is_playing=False, current_artist="—", current_track="—", status="DJ beendet",
+                     playback_progress=None)
         dj_log_queue.put("[DJ process exited]")
 
     threading.Thread(target=reader, daemon=True).start()
 
 
 # ── Broadcast loop ──
+
+def dashboard_state():
+    snapshot = dict(state)
+    sample = snapshot.get("playback_progress")
+    if sample is not None:
+        sample = dict(sample)
+        sample["age_ms"] = max(0, (time.monotonic() - sample.pop("received_at")) * 1000)
+        snapshot["playback_progress"] = sample
+    return snapshot
+
 
 def broadcast_loop():
     while True:
@@ -124,7 +178,7 @@ def broadcast_loop():
             if vlines:
                 socketio.emit("voice_log", {"lines": vlines}, namespace="/")
 
-            socketio.emit("state", state, namespace="/")
+            socketio.emit("state", dashboard_state(), namespace="/")
         except Exception as e:
             print(f"[broadcast] error: {e}")
 
@@ -142,6 +196,8 @@ def index():
 def voice_log_endpoint():
     data = request.get_json(silent=True) or {}
     msg  = data.get("msg", "")
+    if isinstance(data.get("recording"), bool):
+        state["recording"] = data["recording"]
     if msg:
         voice_log_queue.put(msg)
     return "", 204
@@ -193,13 +249,31 @@ def handle_command(data):
 
 @socketio.on("connect")
 def on_connect():
-    emit("state", state)
+    emit("state", dashboard_state())
 
 
 # ── Entry point ──
 
 if __name__ == "__main__":
-    launch_dj()
-    print("[server] Dashboard at http://127.0.0.1:5001")
-    threading.Thread(target=broadcast_loop, daemon=True).start()
-    socketio.run(app, host="127.0.0.1", port=5001, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+    server_lock = InstanceLock(str(BASE_DIR / "data" / "server.lock"))
+    if not server_lock.acquire():
+        print("[server] Dashboard already running at http://127.0.0.1:5001")
+        sys.exit(0)
+    try:
+        # Check before launching the child, including older servers which do
+        # not yet hold server.lock. Keep Werkzeug as the actual HTTP server.
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", 5001))
+            except OSError:
+                print("[server] Port 5001 already in use; no second DJ launched.")
+                sys.exit(0)
+        launch_dj()
+        print("[server] Dashboard at http://127.0.0.1:5001")
+        threading.Thread(target=broadcast_loop, daemon=True).start()
+        socketio.run(app, host="127.0.0.1", port=5001, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+    finally:
+        if dj_process and dj_process.poll() is None:
+            dj_process.terminate()
+            dj_process.wait(timeout=10)
+        server_lock.release()
