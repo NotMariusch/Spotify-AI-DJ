@@ -2,10 +2,11 @@
 from collections import OrderedDict, deque
 from dataclasses import asdict, replace
 
-from music_request import RequestValidationError, artist_key, song_key
+from music_request import RequestValidationError, artist_key, song_key, preserve_refinement_selection
 
 
 def is_session_reset(text):
+    # Accept the old ASCII spelling too; visible messages use real umlauts.
     return text.casefold().strip().rstrip('.!') in {
         'new ai session', 'reset ai session', 'ai reset', 'session reset',
         'neue ai-session', 'neue ai session', 'ai-session zuruecksetzen',
@@ -47,41 +48,44 @@ class AISession:
     def note_problem(self, user_text, message):
         self.pending = dict(request=user_text[:1000], question=message[:500])
 
-    def reconcile(self, plan):
+    def reconcile(self, plan, user_text=None):
         previous = self.plan
+        if user_text is not None:
+            plan = preserve_refinement_selection(plan, previous, user_text)
         if plan.context_action == 'refine':
             if previous is None and self.pending is None and self.last_song is None:
-                raise RequestValidationError('Rueckfrage: Worauf bezieht sich dein Wunsch? Bitte zuerst Musik nennen.')
+                raise RequestValidationError('Rückfrage: Worauf bezieht sich dein Wunsch? Bitte zuerst Musik nennen.')
             if previous:
                 values = dict(style=plan.style or previous.style, mood=plan.mood or previous.mood,
                               artist_scope=previous.artist_scope)
                 if plan.year_start is None:
                     values.update(year_start=previous.year_start, year_end=previous.year_end)
                 elif previous.year_start is not None and (plan.year_start, plan.year_end) != (previous.year_start, previous.year_end):
-                    raise RequestValidationError('Die Folgeanfrage hat den Zeitraum veraendert. Bitte den neuen Zeitraum ausdruecklich anfragen.')
+                    raise RequestValidationError('Die Folgeanfrage hat den Zeitraum verändert. Bitte den neuen Zeitraum ausdrücklich anfragen.')
                 if previous.artist_scope == 'fixed':
                     allowed = {artist_key(n) for n in previous.artists}
                     if any(artist_key(n) not in allowed for n in plan.artists):
-                        raise RequestValidationError('Die Folgeanfrage wuerde deine feste Kuenstlerauswahl erweitern. Bitte die neue Auswahl ausdruecklich nennen.')
+                        raise RequestValidationError('Die Folgeanfrage würde deine feste Künstlerauswahl erweitern. Bitte die neue Auswahl ausdrücklich nennen.')
                     values['artist_scope'] = 'fixed'
-                if previous.selection == 'hits' and plan.kind == 'discovery' and plan.selection != 'hits':
+                if user_text is None and previous.selection == 'hits' and plan.kind == 'discovery' and plan.selection != 'hits':
                     raise RequestValidationError('Die Folgeanfrage hat die Hit-Auswahl verloren; bitte erneut konkretisieren.')
                 plan = replace(plan, **values)
         excluded = {artist_key(n): n for n in self.excluded_artists + plan.excluded_artists}
         songs = {(artist_key(s.artist), song_key(s.title)): s for s in self.excluded_songs + plan.excluded_songs}
         if len(excluded) > 24 or len(songs) > 40:
-            raise RequestValidationError('Zu viele Session-Ausschluesse; mit "Neue AI-Session" zuruecksetzen.')
+            raise RequestValidationError('Zu viele Session-Ausschlüsse; mit "Neue AI-Session" zurücksetzen.')
         plan = replace(plan, excluded_artists=tuple(excluded.values()), excluded_songs=tuple(songs.values()),
                        avoid_session_repeats=self.avoid_repeats or plan.avoid_session_repeats)
         artists = tuple(n for n in plan.artists if artist_key(n) not in excluded)
         if plan.kind == 'songs' and (len(artists) != len(plan.artists) or any(
                 (artist_key(s.artist), song_key(s.title)) in songs for s in plan.songs)):
-            raise RequestValidationError('Ein Songwunsch widerspricht deinen Session-Ausschluessen. Mit "Neue AI-Session" zuruecksetzen.')
+            raise RequestValidationError('Ein Songwunsch widerspricht deinen Session-Ausschlüssen. Mit "Neue AI-Session" zurücksetzen.')
         wishes = tuple(s for s in plan.songs if artist_key(s.artist) not in excluded
                        and (artist_key(s.artist), song_key(s.title)) not in songs)
         if not artists or ((plan.kind == 'songs' or plan.selection == 'hits') and not wishes):
-            raise RequestValidationError('Nach den Session-Ausschluessen bleibt keine passende Auswahl. Bitte die Anfrage anpassen.')
-        return replace(plan, artists=artists, songs=wishes)
+            raise RequestValidationError('Nach den Session-Ausschlüssen bleibt keine passende Auswahl. Bitte die Anfrage anpassen.')
+        hints = tuple(h for h in plan.artist_hints if artist_key(h.artist) not in excluded)
+        return replace(plan, artists=artists, songs=wishes, artist_hints=hints)
 
     def accept(self, plan, user_text):
         self.plan = plan

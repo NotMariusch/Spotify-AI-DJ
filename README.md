@@ -113,9 +113,9 @@ It will print an authorization URL. Open it in your browser, authorize the app, 
 ```
 start_dj.bat
 ```
-The first run fetches and caches all artists (~1 minute with rate-limit delays). After that, subsequent startups load from cache instantly.
+Startup waits for a mode choice; artist catalogs are fetched on demand and cached.
 
-> **Note:** Spotify enforces strict API rate limits. If you hit a limit during the first fetch (startup will print a warning and stop early), the DJ will still run using whichever artists were cached successfully. The missing artists will be retried automatically on the next startup once the ban window expires (can be several hours). Do not delete `track_cache.json` between runs unless necessary.
+> **Note:** Spotify HTTP 429 events appear in the dashboard console with the wait time and local retry time. All Spotify API calls share that cooldown. A single notice appears when the wait expires; that allows another attempt, without guaranteeing Spotify will accept it. A stopped AI catalog/song lookup resumes with Skip; if artist resolution was interrupted, resend the AI request. Claude HTTP 429 events are labeled separately and require resending the request after the displayed wait. Existing caches remain intact.
 
 **11. For normal background use:**
 ```
@@ -144,13 +144,15 @@ When you name one or more specific artists, the DJ plays only those artists. Whe
 
 Claude interprets the request into validated fields for artists, songs, years, style, mood, and hit selection. Spotify supplies all actual artist/track IDs. AI plays never affect your weight system or permanent artist pools.
 
-Artist lookup checks up to ten candidates using an artist-filtered search, with at most one plain-name fallback. Accents and punctuation are normalized; `Pink` explicitly resolves as `P!nk`, never as `PinkPantheress`. Ambiguous exact-name profiles are skipped rather than guessed. The search size follows the [current Spotify Search API limit](https://developer.spotify.com/documentation/web-api/reference/search).
+Artist lookup checks up to ten candidates using an artist-filtered search, with at most one plain-name fallback. Accents and punctuation are normalized; `Pink` explicitly resolves as `P!nk`, never as `PinkPantheress`. For multiple exact-name profiles, the model supplies up to two real song-title identity hints per artist (`artist_hints`); existing song suggestions can also provide anchors. Cached Spotify catalog metadata is reused first, with at most two additional track searches per ambiguous artist. Both distinct titles must jointly identify exactly one candidate via actual Spotify artist IDs and valid track/album metadata. Popularity and search rank never break a tie. Missing, conflicting or still-ambiguous evidence leaves the artist unresolved. Identity hints never become a playback queue or restrict free catalog selection. The search size follows the [current Spotify Search API limit](https://developer.spotify.com/documentation/web-api/reference/search).
 
-Before the first AI track starts, catalogs for the resolved request pool are prepared sequentially, reusing valid caches. This can make a new request slower to start. Rate limits stop preparation instead of silently reducing the session to the first cached artist; retry after the indicated cooldown. No catalog requests run in the automatic transition's end window.
+For catalog-based AI selection, catalogs for the resolved request pool are prepared sequentially, reusing valid caches. This can make a new request slower to start. Curated hits and finite song lists reuse cached metadata and search directly for the suggestions instead of downloading all artist catalogs. Rate limits stop preparation instead of silently reducing the session to the first cached artist; retry after the indicated cooldown. No catalog requests run in the automatic transition's end window.
 
 Rotation chooses randomly among the less-played requested artists and avoids immediately repeating an artist whenever another requested artist has an eligible track. One-artist requests remain one-artist requests. These counters update only after confirmed playback, live only in memory, and reset on a new AI request. They are rotation bookkeeping, not a learned preference profile; they never change normal weights, artist pools, trial progress, or persistent recent history. The catalog cache stores Spotify metadata only.
 
 A request such as `2000s pop` restricts tracks to 2000–2009. For hits/bangers/nostalgia, Claude supplies concrete song suggestions and the DJ uses only suggestions resolved to the correct Spotify artist and title, within the requested years. Genre, mood, and how recognizable a song is remain model recommendations; Spotify metadata verifies identity and dates, not subjective fit. Invalid or missing suggestions do not fall back to arbitrary catalog tracks.
+
+Model-generated hit suggestions are recommendations, not mandatory ordered song wishes. A defensive check corrects broad genre/nostalgia requests misclassified as fixed song lists when none of the proposed titles were named. Multiple eligible copies of a suggested hit do not require a user version choice; an actually explicit, materially ambiguous song wish still asks for clarification and clearly reports that it is waiting for an answer.
 
 Era checks use Spotify album release dates and the earliest observed matching catalog release. Later reissues require an identical ISRC with a known release in the requested period; unknown dates are excluded. This is conservative catalog evidence, not a guarantee of the original worldwide release date. Some valid songs may be unavailable when that evidence is missing.
 
@@ -168,6 +170,10 @@ You: Neue AI-Session
 ```
 
 Refinements retain the current period, style and hit preference. An explicitly restricted artist pool stays restricted; a model-suggested pool can adapt to a new mood. A self-contained new request can choose a different period or artists. The last confirmed song helps resolve “this song,” and answers to clarification questions include the pending original request. Ambiguous or invalid follow-ups produce a status message rather than an invented selection.
+
+Selection inheritance works in both directions: `Music to game to` followed by `more hype/aggressive` keeps free catalog selection; a hit-based request keeps hits. Code enforces this even if the model changes the selection type. An explicit request for hits/bangers/classics can enable hits, while `use the full catalog`, `freie Titelauswahl` or `keine Hits` can return to free selection. Any discarded generated hit list is retained only as bounded identity evidence; it neither limits the catalog nor triggers song-wish resolution.
+
+If a discovery/hits refinement omits its required song hints, a recognized no-repeat-only update can reuse the previous hints when the music selection is unchanged. A changed mood (for example, `Mehr davon, aber mehr aggressiv/hype`) instead gets at most one additional Claude completion to supply matching hints and the updated mood. This extra completion can incur API usage; it never runs in a loop or silently reuses the old music for a new mood. The normal Spotify identity, year, version, exclusion and session-history checks still apply. Empty explicit song lists and empty new hit requests remain invalid.
 
 Temporary artist/song exclusions and the no-repeat rule remain active across AI requests until `Neue AI-Session` (also `AI reset`) or a DJ process restart. Reset releases automatic control and waits for a new wish; it leaves the current Spotify playback running. Normal DJ modes ignore these AI filters and end the previous conversation topic. Their confirmed starts still count as earlier music for a later AI no-repeat request. The history covers at most 2,000 artist/title identities since the process started or the session was reset; album copies share an identity. Concrete repeat song wishes take priority over the general no-repeat rule, while explicit exclusions still require a session reset.
 
@@ -216,8 +222,16 @@ Requires AutoHotkey v2 running `scripts/dj_hotkey.ahk`. Right Ctrl is remapped t
 | F13 + 6 | Skip current track |
 | F13 + 7 | Ban current artist permanently (discovered artists only) |
 | F13 + 8 | Ban current track permanently |
-| F13 + 9 | Quit DJ cleanly |
+| F13 + 9 | Quit DJ, dashboard server and running voice client |
 | F13 + V | Toggle voice recording (via dj_voice.py) |
+
+The dashboard's **Quit DJ**, chat `quit`, and **F13 + 9** stop the whole backend. The server watches quit independently of the DJ loop, including during slow AI/API requests. It allows eight seconds for a cooperative DJ exit, then terminates only its own DJ process tree if necessary (including Windows venv redirector children). The dashboard reports completion on disconnect, the listener and instance lock are released, and the hidden batch window closes without waiting at `pause`.
+
+German dashboard, status, error and voice messages use proper umlauts and `ß`. Both hidden launch paths use UTF-8 for Python output, including redirected logs. The ASCII input alias `ai-session zuruecksetzen` remains accepted alongside `AI-Session zurücksetzen`.
+
+Wait for the dashboard's ended message, then run `start_dj_hidden.vbs` again. A stale quit control command cannot immediately stop the restarted DJ. Learning, caches, bans and authentication files remain intact. Spotify itself stays open and continues its own playback. AutoHotkey stays available for the next DJ start. A separately running voice client receives a process-local stop notice via the ignored runtime file `data/shutdown.signal`; restart it with `start_voice_hidden.vbs` when needed. Old notices are ignored when starting a new voice client.
+
+DJ learning, catalog, recent-history, discovery and ban snapshots are written to a temporary file in the data directory, flushed, and atomically replace the old JSON only after completion. An interrupted write leaves the previous snapshot intact; an abrupt process kill can leave an ignored `.tmp` file. OAuth/token storage is unchanged.
 
 ## How the Weight System Works
 

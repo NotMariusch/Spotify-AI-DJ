@@ -429,6 +429,7 @@
   // End progress model.
 
   let progressSample = null;
+  let shuttingDown = false;
   function renderProgress() {
     const value = progressAt(progressSample, performance.now());
     const rail = document.getElementById("progress-rail");
@@ -448,9 +449,15 @@
     else rail.removeAttribute("aria-valuenow");
   }
   setInterval(renderProgress, 100);
-  socket.on("disconnect", () => { progressSample = null; renderProgress(); });
+  socket.on("disconnect", () => {
+    progressSample = null; renderProgress();
+    document.getElementById("dj-status").textContent = shuttingDown
+      ? "DJ und Dashboard beendet. Für den Neustart start_dj_hidden.vbs ausführen."
+      : "Verbindung zum DJ unterbrochen";
+  });
 
   socket.on("state", (s) => {
+    shuttingDown = Boolean(s.shutting_down);
     progressSample = progressSampleFromState(s, progressSample, performance.now());
     renderProgress();
     document.getElementById("dj-status").textContent = s.status || "Warte auf DJ";

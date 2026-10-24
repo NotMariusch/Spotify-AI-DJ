@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import ai_request
 import spotify_dj as dj
 from music_request import (parse_music_request, RequestValidationError, constrain_tracks,
-                           resolve_song_wishes, check_explicit_period)
+                           resolve_song_wishes, check_explicit_period, check_request_kind)
 from playback_state import PlaybackTracker
 
 
@@ -34,6 +34,19 @@ def song(title='Hit', year='2003', artist='artist', isrc=None, **overrides):
 
 
 class InterpretationTests(unittest.TestCase):
+    def test_childhood_pop_is_discovery_even_if_model_returns_fixed_song_list(self):
+        plan = request(kind='songs', songs=[dict(artist='Artist', title='SexyBack'), dict(artist='Artist', title='Toxic')])
+        fixed = check_request_kind(plan, '2000s pop from my childhood please')
+        self.assertEqual((fixed.kind, fixed.selection, fixed.artist_scope), ('discovery', 'hits', 'suggested'))
+        self.assertFalse(fixed.continue_similar)
+        self.assertEqual(fixed.songs, plan.songs)
+
+    def test_actual_named_songs_and_clarification_answers_remain_explicit(self):
+        plan = request(kind='songs', songs=[dict(artist='Artist', title='SexyBack')])
+        self.assertEqual(check_request_kind(plan, 'Play SexyBack, a pop song').kind, 'songs')
+        context = dict(pending=dict(request='Play SexyBack, a pop song', question='Which artist?'))
+        self.assertEqual(check_request_kind(plan, 'Justin Timberlake', context).kind, 'songs')
+
     def test_schema_retains_era_style_mood_and_hits(self):
         plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
         self.assertEqual((plan.year_start, plan.year_end), (2000, 2009))
@@ -64,10 +77,10 @@ class InterpretationTests(unittest.TestCase):
 
     def test_clarification_is_displayable_instead_of_guessing_artist(self):
         with self.assertRaisesRegex(RequestValidationError, 'Welchen'):
-            request(artists=[], clarification='Welchen Kuenstler meinst du mit Hello?')
+            request(artists=[], clarification='Welchen Künstler meinst du mit Hello?')
 
     def test_claude_contract_is_structured_and_does_not_send_catalog_data(self):
-        payload = dict(kind='discovery', artists=['Artist'], songs=[dict(artist='Artist', title='Hit')],
+        payload = dict(kind='songs', artists=['Artist'], songs=[dict(artist='Artist', title='Hit')],
                        year_start=2000, year_end=2009, style='pop', mood='nostalgia', selection='hits', continue_similar=False)
         response = Mock()
         response.__enter__ = Mock(return_value=response)
@@ -77,10 +90,21 @@ class InterpretationTests(unittest.TestCase):
                 patch.object(ai_request.urllib.request, 'urlopen', return_value=response) as call:
             plan = ai_request.ask_claude('childhood banger pop songs from the 2000s')
         self.assertEqual(plan.selection, 'hits')
+        self.assertEqual(plan.kind, 'discovery')
         sent = json.loads(call.call_args.args[0].data)
         self.assertIn('2000s', sent['messages'][0]['content'])
         self.assertNotIn('spotify:track:', json.dumps(sent))
         self.assertIn('Never output Spotify IDs', sent['system'])
+
+    def test_model_rate_limit_is_typed_and_does_not_retry_or_expose_error_body(self):
+        error = ai_request.urllib.error.HTTPError('https://example.invalid', 429, 'limited', {'Retry-After': '12'}, io.BytesIO(b'private error body'))
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
+                patch.object(ai_request.urllib.request, 'urlopen', side_effect=error) as call:
+            with self.assertRaises(ai_request.ModelRateLimitError) as raised:
+                ai_request.ask_claude('2000s pop')
+        self.assertEqual(raised.exception.retry_after, 12)
+        call.assert_called_once()
+        self.assertNotIn('private error body', str(raised.exception))
 
 
 class EraEvidenceTests(unittest.TestCase):
@@ -169,6 +193,12 @@ class SongResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RequestValidationError, 'Mehrdeutiger Song'):
             self.resolve(tracks)
 
+    def test_broad_hit_suggestions_do_not_require_user_to_choose_a_version(self):
+        self.plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
+        found, missing = self.resolve([song(isrc='USABC0300001'), song(isrc='USABC0300002', duration_ms=240000)])
+        self.assertEqual(len(found), 1)
+        self.assertEqual(missing, [])
+
     def test_unavailable_original_can_prove_isrc_for_compilation_copy(self):
         original = song(isrc='USABC0300001', is_playable=False)
         copy = song(year='2020', isrc='USABC0300001')
@@ -206,13 +236,27 @@ class StructuredPlaybackTests(unittest.TestCase):
     def confirm(self, **kwargs):
         return dict(item={'uri': kwargs['offset']['uri']}, is_playing=True, progress_ms=0, device={'id': 'pc'})
 
+    def test_childhood_request_can_play_despite_ambiguous_copies_and_unresolved_artist(self):
+        plan = request(kind='songs', artists=['Artist', 'Unresolved'], songs=[
+            dict(artist='Artist', title='SexyBack'), dict(artist='Unresolved', title='OtherHit')])
+        dj.ai_request_plan = check_request_kind(plan, '2000s pop from my childhood please')
+        dj.artist_cache['Artist'] = [song('SexyBack', isrc='USABC0300001'),
+                                    song('SexyBack', isrc='USABC0300002', duration_ms=240000)]
+        before = copy.deepcopy(dj.memory)
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        self.assertEqual(dj.now_playing['uri'], song('SexyBack')['uri'])
+        self.assertEqual(dj.ai_song_queue, [])
+        self.assertEqual(dj.memory, before)
+        self.fetch.assert_not_called()
+        dj.save_memory.assert_not_called()
+
     def prepare(self):
         dj.now_playing.update(progress_ms=185000, listened_ms=185000, preparation_attempted=False)
         dj.prepare_next_track()
 
     def test_hits_pool_contains_only_resolved_hints_in_era_and_keeps_constraints_on_transition(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit'), dict(artist='Artist', title='HitTwo')])
-        self.fetch.return_value = [song(), song('HitTwo'), song('DeepCut'), song('Future', '2013')]
+        dj.artist_cache['Artist'] = [song(), song('HitTwo'), song('DeepCut'), song('Future', '2013')]
         before = copy.deepcopy(dj.memory)
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
         self.assertEqual({t['name'] for t in dj.ai_session_catalogs['Artist']}, {'Hit', 'HitTwo'})
@@ -227,6 +271,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         dj.save_memory.assert_not_called()
         dj.save_recent.assert_not_called()
         dj.run_pending_discoveries.assert_not_called()
+        self.fetch.assert_not_called()
 
     def test_explicit_list_order_overrides_recent_history_and_stops_after_last(self):
         dj.ai_request_plan = request(kind='songs', songs=[dict(artist='Artist', title='Two'), dict(artist='Artist', title='One')])
@@ -280,21 +325,23 @@ class StructuredPlaybackTests(unittest.TestCase):
 
     def test_exhausted_hits_pool_prepares_pause_not_album_fallback(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
-        self.fetch.return_value = [song()]
+        dj.artist_cache['Artist'] = [song()]
         dj.play_artist('Artist', 'ai', no_judge=True)
         self.prepare()
         self.assertTrue(dj._prepared_next['stop'])
 
     def test_rate_limit_during_resolution_stays_controlled_and_does_not_learn(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
-        self.fetch.side_effect = dj.RateLimitError(30)
+        self.sp.search.side_effect = dj.RateLimitError(30)
         self.assertFalse(dj.play_artist('Artist', 'ai', no_judge=True))
         self.start.assert_not_called()
         dj.save_memory.assert_not_called()
+        self.sp.search.assert_called_once()
+        self.fetch.assert_not_called()
 
     def test_request_to_playback_keeps_the_structured_constraints(self):
         plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
-        self.fetch.return_value = [song(), song('Future', '2013')]
+        dj.artist_cache['Artist'] = [song(), song('Future', '2013')]
         with patch.object(dj.os.path, 'exists', return_value=True), \
                 patch('builtins.open', side_effect=[io.StringIO('ai:2000s pop'), io.StringIO('quit')]), \
                 patch.object(dj.os, 'remove'), patch.object(dj, 'ask_claude', return_value=plan), \
@@ -308,14 +355,21 @@ class StructuredPlaybackTests(unittest.TestCase):
 
     def test_normal_mode_does_not_inherit_ai_year_constraint(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
-        self.fetch.return_value = [song()]
-        dj.play_artist('Artist', 'ai', no_judge=True)
+        dj.artist_cache['Artist'] = [song()]
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
         self.fetch.return_value = [song('Future', '2013')]
         dj.ai_pool.clear()
         dj.play_artist('Artist', 'jpop', ['Artist'], mode_switch=True)
         self.assertEqual(dj.now_playing['uri'], song('Future', '2013')['uri'])
         self.assertFalse(dj.now_playing['is_ai_play'])
         dj.save_memory.assert_not_called()
+
+    def test_broad_hits_search_directly_without_downloading_full_catalog(self):
+        dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
+        self.sp.search.return_value = dict(tracks=dict(items=[song()]))
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        self.fetch.assert_not_called()
+        self.sp.search.assert_called_once()
 
     def test_completed_song_request_does_not_pause_a_subsequent_normal_mode(self):
         dj.ai_request_plan = request(kind='songs', songs=[dict(artist='Artist', title='Hit')])

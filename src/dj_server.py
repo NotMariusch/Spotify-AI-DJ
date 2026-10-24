@@ -20,7 +20,7 @@ import threading
 import queue
 import time
 import re
-import socket
+import signal
 import json
 import math
 from dotenv import load_dotenv
@@ -28,10 +28,13 @@ from pathlib import Path
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
 from instance_lock import InstanceLock
+from shutdown_signal import ShutdownNotice
+from werkzeug.serving import make_server
 
 BASE_DIR   = Path(__file__).resolve().parent.parent
 INPUT_FILE = BASE_DIR / "data" / "dj_input.txt"
 DJ_SCRIPT  = BASE_DIR / "src" / "spotify_dj.py"
+SHUTDOWN_FILE = BASE_DIR / "data" / "shutdown.signal"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -50,9 +53,12 @@ state = {
     "is_playing":     False,
     "status":         "Warte auf DJ",
     "playback_progress": None,
+    "shutting_down": False,
 }
 
 dj_process = None
+shutdown_requested = threading.Event()
+shutdown_guard = threading.Lock()
 
 # ── DJ process ──
 
@@ -103,7 +109,7 @@ def handle_dj_line(line: str):
     if line.startswith("DJ_STATUS:"):
         message = line[len("DJ_STATUS:"):]
         # Routine activity is visible in the status header and track display.
-        if message in ("DJ aktiv", "Start angefordert; warte auf Spotify-Bestaetigung"):
+        if message in ("DJ aktiv", "Start angefordert; warte auf Spotify-Bestätigung"):
             return
         line = message
     elif line.startswith(("NOW_PLAYING:", "IS_PLAYING:", "CURRENT_ARTIST:", "MODE:", "PLAYBACK_PROGRESS:")):
@@ -129,6 +135,7 @@ def launch_dj():
         errors="replace",
         cwd=str(BASE_DIR),
         env=env,
+        start_new_session=os.name != 'nt',
     )
     print(f"[server] DJ PID: {dj_process.pid}")
 
@@ -156,7 +163,7 @@ def dashboard_state():
 
 
 def broadcast_loop():
-    while True:
+    while not shutdown_requested.is_set():
         try:
             # DJ log
             lines = []
@@ -182,7 +189,7 @@ def broadcast_loop():
         except Exception as e:
             print(f"[broadcast] error: {e}")
 
-        time.sleep(0.25)
+        shutdown_requested.wait(0.25)
 
 
 # ── Routes ──
@@ -206,14 +213,100 @@ def voice_log_endpoint():
 # ── Websocket events ──
 
 def send_command(text: str):
+    if shutdown_requested.is_set() and text != 'quit':
+        return
     with open(INPUT_FILE, "w", encoding="utf-8") as f:
         f.write(text)
+
+
+def request_shutdown(reason='Beenden angefordert'):
+    """One stop path for dashboard, hotkey, child exit and server teardown."""
+    with shutdown_guard:
+        if shutdown_requested.is_set():
+            return
+        shutdown_requested.set()
+        state.update(shutting_down=True, is_playing=False, recording=False,
+                     playback_progress=None, status='DJ und Dashboard werden beendet')
+        print(f'[server] {reason}; beende DJ und Dashboard.', flush=True)
+        try:
+            send_command('quit')
+        except OSError as error:
+            print(f'[server] Quit-Datei nicht schreibbar ({type(error).__name__}); Prozessende wird erzwungen.')
+        try:
+            ShutdownNotice.broadcast(SHUTDOWN_FILE)
+        except OSError as error:
+            print(f'[server] Voice-Stoppsignal nicht schreibbar ({type(error).__name__}).')
+        try:
+            socketio.emit('state', dashboard_state(), namespace='/')
+        except Exception as error:
+            print(f'[server] Abschiedsmeldung nicht gesendet ({type(error).__name__}).')
+
+
+def watch_shutdown():
+    # Independent of the DJ loop, even while Claude/Spotify calls are blocked.
+    while not shutdown_requested.is_set():
+        try:
+            if INPUT_FILE.read_text(encoding='utf-8-sig').strip() == 'quit':
+                request_shutdown('Quit über Hotkey/Chat')
+                return
+        except (OSError, UnicodeError):
+            pass
+        if dj_process is not None and dj_process.poll() is not None:
+            request_shutdown('DJ-Prozess beendet')
+            return
+        shutdown_requested.wait(0.25)
+
+
+def stop_dj(process, timeout=8):
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        print('[server] DJ reagiert nicht rechtzeitig; beende eigenen Prozessbaum.', flush=True)
+    if os.name == 'nt':
+        # Windows venv python.exe is a redirector with another Python child.
+        # Terminating only Popen would leave that child running and locked.
+        result = subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                capture_output=True, timeout=5,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        if result.returncode and process.poll() is None:
+            raise RuntimeError('Eigener DJ-Prozessbaum konnte nicht beendet werden')
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    process.wait(timeout=3)
+
+
+def clear_stale_quit():
+    # Only a control command; preserve all other pending commands and user data.
+    try:
+        if INPUT_FILE.read_text(encoding='utf-8-sig').strip() == 'quit':
+            INPUT_FILE.unlink()
+    except (OSError, UnicodeError):
+        pass
 
 
 @socketio.on("command")
 def handle_command(data):
     cmd = data.get("cmd", "").strip()
     if not cmd:
+        return
+    if cmd == 'quit':
+        request_shutdown('Quit über Dashboard')
+        return
+    if shutdown_requested.is_set():
         return
 
     mode_labels = {"1": "American Rap", "2": "German Trap", "3": "K-Pop", "4": "J-Pop", "5": "Global"}
@@ -254,26 +347,48 @@ def on_connect():
 
 # ── Entry point ──
 
-if __name__ == "__main__":
+def main(port=5001, shutdown_timeout=8):
+    global dj_process
     server_lock = InstanceLock(str(BASE_DIR / "data" / "server.lock"))
     if not server_lock.acquire():
         print("[server] Dashboard already running at http://127.0.0.1:5001")
-        sys.exit(0)
+        return
+    http_server = None
+    watcher = None
+    dj_process = None
     try:
-        # Check before launching the child, including older servers which do
-        # not yet hold server.lock. Keep Werkzeug as the actual HTTP server.
-        with socket.socket() as probe:
-            try:
-                probe.bind(("127.0.0.1", 5001))
-            except OSError:
-                print("[server] Port 5001 already in use; no second DJ launched.")
-                sys.exit(0)
+        # Keep Werkzeug/threading and SocketIO middleware, but own the listener
+        # so quit can stop it cleanly instead of leaving app.run blocked.
+        http_server = make_server('127.0.0.1', port, app, threaded=True)
+        http_server.timeout = .25
+        shutdown_requested.clear()
+        state['shutting_down'] = False
+        clear_stale_quit()
         launch_dj()
-        print("[server] Dashboard at http://127.0.0.1:5001")
+        print(f"[server] Dashboard at http://127.0.0.1:{http_server.server_port}", flush=True)
         threading.Thread(target=broadcast_loop, daemon=True).start()
-        socketio.run(app, host="127.0.0.1", port=5001, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+        watcher = threading.Thread(target=watch_shutdown, daemon=True)
+        watcher.start()
+        while not shutdown_requested.is_set():
+            http_server.handle_request()
+    except KeyboardInterrupt:
+        request_shutdown('Server unterbrochen')
     finally:
-        if dj_process and dj_process.poll() is None:
-            dj_process.terminate()
-            dj_process.wait(timeout=10)
-        server_lock.release()
+        try:
+            if dj_process is not None:
+                request_shutdown('Server wird beendet')
+                stop_dj(dj_process, timeout=shutdown_timeout)
+            shutdown_requested.set()
+            if watcher:
+                watcher.join(timeout=1)
+            clear_stale_quit()
+        finally:
+            try:
+                if http_server is not None:
+                    http_server.server_close()
+            finally:
+                server_lock.release()
+
+
+if __name__ == '__main__':
+    main()

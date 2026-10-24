@@ -11,6 +11,8 @@ data/server.lock
 data/voice.lock
 data/voice.log
 data/dj_input.txt
+data/shutdown.signal
+data/.*.tmp
 data/dj_crash.log
 data/banned_tracks.json
 data/banned_artists.json

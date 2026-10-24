@@ -279,6 +279,33 @@ class IntegrationTests(unittest.TestCase):
             self.assertTrue(gateway.current_playback()['is_playing'])
         self.assertEqual(client.current_playback.call_count, 2)
 
+    def test_rate_limit_notice_and_expiry_reach_dashboard_log_once(self):
+        import dj_server as server
+        import queue
+        client = Mock()
+        client.current_playback.side_effect = dj.spotipy.SpotifyException(429, -1, 'limited', headers={'Retry-After': '5'})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(dj, '_last_status', None):
+            with patch.object(dj.time, 'time', return_value=100):
+                with self.assertRaises(dj.RateLimitError):
+                    dj.SpotifyGateway(client).current_playback()
+                dj.refresh_rate_limit_status()
+            with patch.object(dj.time, 'time', return_value=106):
+                dj.refresh_rate_limit_status()
+                dj.refresh_rate_limit_status()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn('HTTP 429', lines[0])
+        self.assertIn('5s warten', lines[0])
+        self.assertIn('abgelaufen', lines[1])
+        with patch.object(server, 'state', dict(server.state)), patch.object(server, 'dj_log_queue', queue.Queue()):
+            for line in lines:
+                server.handle_dj_line(line)
+            self.assertIn('HTTP 429', server.dj_log_queue.get_nowait())
+            self.assertIn('abgelaufen', server.dj_log_queue.get_nowait())
+            self.assertTrue(server.dj_log_queue.empty())
+        self.assertEqual(client.current_playback.call_count, 1)
+
     def test_retry_after_invalid_values(self):
         for value in ('0', '-1', '', None, 'nan', 'inf', 'invalid'):
             self.assertEqual(dj.retry_seconds(Mock(headers={'Retry-After': value})), 30)
@@ -374,13 +401,13 @@ class DashboardTests(unittest.TestCase):
         old = dict(server.state)
         self.addCleanup(lambda: server.state.update(old))
         with patch.object(server, 'dj_log_queue', queue.Queue()):
-            lines = ['MODE:german_trap', 'DJ_STATUS:Start angefordert; warte auf Spotify-Bestaetigung',
+            lines = ['MODE:german_trap', 'DJ_STATUS:Start angefordert; warte auf Spotify-Bestätigung',
                      'DJ -> Sierra Kidd', '  Sierra Kidd — Song',
                      'NOW_PLAYING:Song', 'IS_PLAYING:true', 'DJ_STATUS:DJ aktiv']
             lines += ['CURRENT_ARTIST:Sierra Kidd'] * 20
             lines += ['DJ_STATUS:Pausiert; auf Fortsetzen in Spotify warten', 'IS_PLAYING:false',
                       'weight [german_trap] Sierra Kidd: 0.500 -> 0.650',
-                      'DJ_STATUS:Start nicht bestaetigt; neuer DJ-Befehl erforderlich']
+                      'DJ_STATUS:Start nicht bestätigt; neuer DJ-Befehl erforderlich']
             for line in lines:
                 server.handle_dj_line(line)
             messages = []
@@ -389,7 +416,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(messages, ['DJ -> Sierra Kidd', 'Sierra Kidd — Song',
                                        'Pausiert; auf Fortsetzen in Spotify warten',
                                        'weight [german_trap] Sierra Kidd: 0.500 -> 0.650',
-                                       'Start nicht bestaetigt; neuer DJ-Befehl erforderlich'])
+                                       'Start nicht bestätigt; neuer DJ-Befehl erforderlich'])
             self.assertEqual(server.state['current_artist'], 'Sierra Kidd')
             self.assertEqual(server.state['current_track'], 'Song')
             self.assertEqual(server.state['mode'], 'German Trap')
@@ -401,14 +428,14 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(lambda: server.state.update(old))
         with patch.object(server, 'subprocess') as process:
             server.parse_dj_line('MODE:german_trap')
-            server.parse_dj_line('DJ_STATUS:Warte auf Spotify-Geraet')
+            server.parse_dj_line('DJ_STATUS:Warte auf Spotify-Gerät')
             server.parse_dj_line('CURRENT_ARTIST:Artist')
             server.parse_dj_line('NOW_PLAYING:Song')
             server.parse_dj_line('IS_PLAYING:false')
             response = server.app.test_client().get('/')
             self.assertEqual(response.status_code, 200)
             self.assertIn(b'id="dj-status"', response.data)
-            self.assertEqual(server.state['status'], 'Warte auf Spotify-Geraet')
+            self.assertEqual(server.state['status'], 'Warte auf Spotify-Gerät')
             self.assertEqual(server.state['mode'], 'German Trap')
             self.assertEqual(server.state['current_track'], 'Song')
             self.assertFalse(server.state['is_playing'])

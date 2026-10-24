@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from ai_request import resolve_artists_to_ids
+from music_request import SongWish
 from playback_state import PlaybackTracker
 import spotify_dj as dj
 
@@ -56,6 +57,74 @@ class ArtistResolutionTests(unittest.TestCase):
         self.sp.search.return_value = results(('Artist', 'one'), ('Artist', 'two'))
         self.assertEqual(resolve_artists_to_ids(self.sp, ['Artist'], {}), [])
         self.sp.search.assert_called_once()
+
+    def anchored_track(self, title, artist_id, artist_name='Knife Party'):
+        return dict(name=title, uri='spotify:track:Recording', album=dict(uri='spotify:album:Album'),
+                    artists=[dict(name=artist_name, id=artist_id)])
+
+    def test_two_song_anchors_resolve_same_name_profiles_without_popularity_ranking(self):
+        profiles = results(('Knife Party', 'wrong'), ('Knife Party', 'right'))
+        hints = [SongWish('Knife Party', 'Internet Friends'), SongWish('Knife Party', 'Rage Valley')]
+        self.sp.search.side_effect = [profiles,
+            dict(tracks=dict(items=[self.anchored_track('Internet Friends', 'right')])),
+            dict(tracks=dict(items=[self.anchored_track('Rage Valley', 'right')]))]
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Knife Party'], {}, hints), [('Knife Party', 'right')])
+        self.assertEqual(self.sp.search.call_count, 3)
+        self.assertEqual([c.kwargs['type'] for c in self.sp.search.call_args_list], ['artist', 'track', 'track'])
+        self.assertIn('Internet Friends', self.sp.search.call_args_list[1].kwargs['q'])
+
+    def test_cached_catalog_can_prove_two_titles_without_extra_requests(self):
+        self.sp.search.return_value = results(('Perturbator', 'wrong'), ('Perturbator', 'right'))
+        hints = [SongWish('Perturbator', 'Future Club'), SongWish('Perturbator', 'Humans Are Such Easy Prey')]
+        cached = {'Perturbator': [self.anchored_track(h.title, 'right', 'Perturbator') for h in hints]}
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Perturbator'], {}, hints, cached), [('Perturbator', 'right')])
+        self.sp.search.assert_called_once()
+
+    def test_conflicting_title_evidence_does_not_choose_highest_score(self):
+        hints = [SongWish('Knife Party', 'First'), SongWish('Knife Party', 'Second')]
+        self.sp.search.side_effect = [results(('Knife Party', 'one'), ('Knife Party', 'two')),
+            dict(tracks=dict(items=[self.anchored_track('First', 'one')])),
+            dict(tracks=dict(items=[self.anchored_track('Second', 'two')]))]
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Knife Party'], {}, hints), [])
+        self.assertEqual(self.sp.search.call_count, 3)
+
+    def test_two_profiles_sharing_both_titles_remain_ambiguous(self):
+        hints = [SongWish('Knife Party', 'First'), SongWish('Knife Party', 'Second')]
+        self.sp.search.side_effect = [results(('Knife Party', 'one'), ('Knife Party', 'two'))] + [
+            dict(tracks=dict(items=[self.anchored_track(h.title, profile) for profile in ('one', 'two')])) for h in hints]
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Knife Party'], {}, hints), [])
+        self.assertEqual(self.sp.search.call_count, 3)
+
+    def test_duplicate_hints_do_not_count_as_two_independent_titles(self):
+        self.sp.search.return_value = results(('Knife Party', 'one'), ('Knife Party', 'two'))
+        hints = [SongWish('Knife Party', 'Internet Friends'), SongWish('Knife Party', 'Internet Friends')]
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Knife Party'], {}, hints), [])
+        self.sp.search.assert_called_once()
+
+    def test_single_found_anchor_or_wrong_artist_cannot_resolve_profile(self):
+        hints = [SongWish('Knife Party', 'First'), SongWish('Knife Party', 'Second')]
+        self.sp.search.side_effect = [results(('Knife Party', 'one'), ('Knife Party', 'two')),
+            dict(tracks=dict(items=[self.anchored_track('First', 'one')])),
+            dict(tracks=dict(items=[self.anchored_track('Second', 'one', 'Wrong Artist')]))]
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Knife Party'], {}, hints), [])
+
+    def test_titles_without_valid_album_metadata_do_not_confirm_profile(self):
+        hints = [SongWish('Knife Party', 'First'), SongWish('Knife Party', 'Second')]
+        items = []
+        for hint in hints:
+            item = self.anchored_track(hint.title, 'one')
+            item['album'] = {}
+            items.append(item)
+        self.sp.search.side_effect = [results(('Knife Party', 'one'), ('Knife Party', 'two')),
+                                     dict(tracks=dict(items=items)), dict(tracks=dict(items=items))]
+        self.assertEqual(resolve_artists_to_ids(self.sp, ['Knife Party'], {}, hints), [])
+
+    def test_rate_limit_during_profile_verification_aborts_remaining_artists(self):
+        hints = [SongWish('Knife Party', 'First'), SongWish('Knife Party', 'Second')]
+        self.sp.search.side_effect = [results(('Knife Party', 'one'), ('Knife Party', 'two')), dj.RateLimitError(30)]
+        with self.assertRaises(dj.RateLimitError):
+            resolve_artists_to_ids(self.sp, ['Knife Party', 'Other'], {}, hints)
+        self.assertEqual(self.sp.search.call_count, 2)
 
     def test_aliases_do_not_duplicate_an_artist_in_pool(self):
         self.sp.search.return_value = results(('P!nk', 'pink'))

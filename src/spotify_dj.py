@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 from collections import deque
 from playback_state import PlaybackTracker
 from instance_lock import InstanceLock
-from ai_request import ask_claude, resolve_artists_to_ids
+from json_store import write_json_atomic
+from ai_request import ask_claude, resolve_artists_to_ids, ModelRateLimitError
 from ai_session import AISession, is_session_reset
 from music_request import RequestValidationError, constrain_tracks, resolve_song_wishes, release_year
 
@@ -110,8 +111,7 @@ def load_track_cache():
             track_disk_cache = {}
 
 def save_track_cache():
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(track_disk_cache, f, indent=2)
+    write_json_atomic(CACHE_FILE, track_disk_cache)
 
 # Startup loading is performed in main(), never on import.
 
@@ -185,11 +185,9 @@ def load_recent():
 
 def save_recent():
     """Persist recent_titles to disk."""
-    with open(RECENT_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "titles":  list(recent_titles),
-            "artists": list(recent_artists),
-        }, f)
+    write_json_atomic(RECENT_FILE, {
+        "titles": list(recent_titles), "artists": list(recent_artists),
+    }, indent=None)
 
 
 # =====================
@@ -211,8 +209,7 @@ def load_banned():
             banned_track_ids = set()
 
 def save_banned():
-    with open(BANNED_FILE, "w", encoding="utf-8") as f:
-        json.dump({"track_ids": list(banned_track_ids)}, f, indent=2)
+    write_json_atomic(BANNED_FILE, {"track_ids": list(banned_track_ids)})
 
 def ban_current_track():
     """
@@ -271,8 +268,7 @@ def load_banned_artists():
             banned_artist_names = set()
 
 def save_banned_artists():
-    with open(BANNED_ARTISTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"artist_names": list(banned_artist_names)}, f, indent=2)
+    write_json_atomic(BANNED_ARTISTS_FILE, {"artist_names": list(banned_artist_names)})
 
 def ban_current_artist():
     """
@@ -420,8 +416,7 @@ def upgrade_memory(data):
     return data
 
 def save_memory(mem):
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(mem, f, indent=2)
+    write_json_atomic(MEMORY_FILE, mem)
 
 # How much of the distance to 1.0 decays per week (10%).
 # A weight of 3.0 becomes 3.0 - (3.0 - 1.0) * 0.10 = 2.8 after one week.
@@ -490,7 +485,7 @@ def load_memory():
         apply_weight_decay(data)
         return data
     except Exception:
-        raise RuntimeError("Lerndaten nicht lesbar; Datei bleibt unveraendert.") from None
+        raise RuntimeError("Lerndaten nicht lesbar; Datei bleibt unverändert.") from None
 
 memory = default_memory()
 
@@ -573,8 +568,7 @@ def load_discovered():
         return {}
 
 def save_discovered(data):
-    with open(DISCOVERED_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    write_json_atomic(DISCOVERED_FILE, data)
 
 discovered_artists = {}
 
@@ -768,6 +762,14 @@ def retry_seconds(error):
         return 30
 
 
+def refresh_rate_limit_status():
+    """One expiry notice, without making a request or restarting playback."""
+    global _rate_limit_until
+    if _rate_limit_until > 0 and time.time() >= _rate_limit_until:
+        _rate_limit_until = 0
+        status("Spotify Rate-Limit: Wartezeit abgelaufen; erneute API-Anfragen erlaubt")
+
+
 class SpotifyGateway:
     """Share one cooldown across all Spotify endpoints; no SDK retry sleeps."""
     def __init__(self, client):
@@ -777,6 +779,7 @@ class SpotifyGateway:
         method = getattr(self.client, name)
         def call(*args, **kwargs):
             global _rate_limit_until
+            refresh_rate_limit_status()
             if time.time() < _rate_limit_until:
                 raise RateLimitError(_rate_limit_until - time.time())
             try:
@@ -785,7 +788,8 @@ class SpotifyGateway:
                 if error.http_status == 429:
                     wait = retry_seconds(error)
                     _rate_limit_until = time.time() + wait
-                    status(f"Rate-Limit: {wait:.0f}s warten")
+                    deadline = time.strftime('%H:%M:%S', time.localtime(_rate_limit_until))
+                    status(f"Spotify Rate-Limit (HTTP 429): {math.ceil(wait)}s warten, bis {deadline}; Spotify-Anfragen ausgesetzt")
                     raise RateLimitError(wait) from None
                 raise
         return call
@@ -816,7 +820,7 @@ def get_active_device_id():
     else:
         chosen = next((d for d in devices if d.get("is_active") and not d.get("is_restricted")), None)
     if not chosen or not chosen.get("id"):
-        raise DeviceUnavailable("Spotify-Geraet nicht bereit; Spotify oeffnen oder Geraet aktivieren.")
+        raise DeviceUnavailable("Spotify-Gerät nicht bereit; Spotify öffnen oder Gerät aktivieren.")
     return chosen["id"]
 
 
@@ -832,7 +836,7 @@ def safe_play(_device_id=None, **kwargs):
     # Automatic transitions already have a just-confirmed owned device.
     device_id = _device_id if _device_id is not None else get_active_device_id()
     expected_uri = kwargs["offset"]["uri"]
-    status("Start angefordert; warte auf Spotify-Bestaetigung")
+    status("Start angefordert; warte auf Spotify-Bestätigung")
     print("IS_PLAYING:false")
     publish_progress(None)
     sp.start_playback(device_id=device_id, **kwargs)
@@ -848,7 +852,7 @@ def safe_play(_device_id=None, **kwargs):
                 and (pb.get("device") or {}).get("id") == device_id
                 and (pb.get("context") or {}).get("uri") == kwargs["context_uri"]):
             return pb
-    status("Start nicht bestaetigt; neuer DJ-Befehl erforderlich")
+    status("Start nicht bestätigt; neuer DJ-Befehl erforderlich")
     return None
 
 
@@ -1096,22 +1100,22 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
         if ai_song_queue:
             name, chosen = ai_song_queue[0]
             if chosen.get("id") in banned_track_ids or name in banned_artist_names:
-                status("Der naechste Songwunsch ist gesperrt; Anfrage bitte anpassen")
+                status("Der nächste Songwunsch ist gesperrt; Anfrage bitte anpassen")
                 return False
             if not ai_session.allows(ai_request_plan, name, chosen, explicit=True):
-                status("Der Songwunsch widerspricht deinen Session-Ausschluessen")
+                status("Der Songwunsch widerspricht deinen Session-Ausschlüssen")
                 return False
             try:
                 return start_selected(name, "ai", chosen, True)
             except DeviceUnavailable:
                 _pending_selection = (name, "ai", chosen, True)
                 _next_device_check = time.monotonic() + 15
-                status("Warte auf Spotify-Geraet fuer den Songwunsch")
+                status("Warte auf Spotify-Gerät für den Songwunsch")
                 return False
             except Exception as error:
                 status(f"Songwunsch nicht gestartet ({type(error).__name__}); erneut versuchen")
                 return False
-        status("Songwuensche abgeschlossen; neuer DJ-Befehl erforderlich")
+        status("Songwünsche abgeschlossen; neuer DJ-Befehl erforderlich")
         return False
     candidates = (ai_artist_order(allowed, preferred=name) if no_judge else
                   ([name] if name in allowed else []) + [n for n in allowed if n != name])
@@ -1126,7 +1130,7 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
                          and normalize_title(t["name"]) not in ai_recent_titles
                          and (not no_judge or ai_session.allows(ai_request_plan, candidate, t))]
             if not available:
-                print(f"  {candidate}: keine passenden, nicht kuerzlich gehoerten Tracks.")
+                print(f"  {candidate}: keine passenden, nicht kürzlich gehörten Tracks.")
                 continue
             chosen = random.choice(available)
             try:
@@ -1134,7 +1138,7 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
             except DeviceUnavailable:
                 _pending_selection = (candidate, mode, chosen, no_judge)
                 _next_device_check = time.monotonic() + 15
-                status("Warte auf Spotify-Geraet; erneute Pruefung in 15s")
+                status("Warte auf Spotify-Gerät; erneute Prüfung in 15s")
                 print("IS_PLAYING:false")
                 return False
         except RateLimitError:
@@ -1258,7 +1262,7 @@ def ensure_ai_catalogs():
             status("AI-Katalogvorbereitung durch Rate-Limit pausiert; nach Wartezeit erneut starten")
             return False
         except Exception as error:
-            status(f"AI-Katalog fuer {name} nicht ladbar ({type(error).__name__}); erneut versuchen")
+            status(f"AI-Katalog für {name} nicht ladbar ({type(error).__name__}); erneut versuchen")
             return False
         ai_session_catalogs[name] = tracks
         print(f"  AI: {name}: {len(select_best_tracks(tracks))} passende Titel")
@@ -1280,8 +1284,10 @@ def ensure_structured_request():
         for name, _ in ai_pool:
             if name in banned_artist_names:
                 raw[name] = []
-            elif plan.kind == "songs" and not plan.continue_similar:
-                # A single song wish does not require downloading a whole catalog.
+            elif ((plan.kind == "songs" and not plan.continue_similar)
+                  or (plan.kind == "discovery" and plan.selection == "hits")):
+                # Resolve concrete wishes/hit hints directly instead of downloading
+                # every selected artist's complete catalog before the first song.
                 raw[name] = artist_cache.get(name, track_disk_cache.get(name, {}).get("tracks", []))
             else:
                 print(f"  AI: preparing constrained catalog for {name}...")
@@ -1289,15 +1295,18 @@ def ensure_structured_request():
         catalogs = {name: [t for t in select_best_tracks(constrain_tracks(tracks, plan, tracks))
                            if ai_session.allows(plan, name, t)] for name, tracks in raw.items()}
         if plan.songs:
+            status(f"AI: Prüfe {len(plan.songs)} Songwünsche/-vorschläge auf Spotify")
             qualify = lambda ts: [t for t in select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
                                   if t.get("id") not in banned_track_ids
                                   and not ({a.get('name') for a in t.get('artists', [])} & banned_artist_names)
                                   and ai_session.allows(plan, '', t, explicit=plan.kind == 'songs')]
             found, missing = resolve_song_wishes(sp, plan, ai_pool, raw, qualify, ai_song_resolutions)
             for title in missing:
-                print(f"  AI: nicht eindeutig/passend auf Spotify aufgeloest: {title}")
+                reason = ("Hit-Vorschlag ausgelassen (kein passender Treffer oder durch Filter/Session ausgeschlossen)"
+                          if plan.kind == "discovery" else "Songwunsch nicht eindeutig/passend auf Spotify aufgeloest")
+                print(f"  AI: {reason}: {title}")
             if plan.kind == "songs" and missing:
-                status("Songwunsch nicht vollstaendig aufloesbar: " + "; ".join(missing) + ". Bitte konkretisieren.")
+                status("Songwunsch nicht vollständig auflösbar: " + "; ".join(missing) + ". Bitte konkretisieren.")
                 return False
             if plan.kind == "songs":
                 ai_song_queue.extend(found)
@@ -1307,25 +1316,25 @@ def ensure_structured_request():
                     if chosen["uri"] not in {t["uri"] for t in catalogs[name]}:
                         catalogs[name].append(chosen)
             if plan.selection == "hits" and not found:
-                status("Keine passenden, auf Spotify geprueften Hits gefunden; Anfrage bitte anpassen")
+                status("Keine passenden, auf Spotify geprüften Hits gefunden; Anfrage bitte anpassen")
                 return False
         ai_session_catalogs.update(catalogs)
         ai_request_tracks_ready = True
-        print(f"  AI: {sum(len(ts) for ts in catalogs.values())} passende Titel; {len(ai_song_queue)} konkrete Songwuensche")
+        print(f"  AI: {sum(len(ts) for ts in catalogs.values())} passende Titel; {len(ai_song_queue)} konkrete Songwünsche")
         return True
     except RequestValidationError as error:
         ai_session.note_problem(ai_session.turns[-1] if ai_session.turns else "", str(error))
-        status(f"AI: {error}")
+        status(f"AI wartet auf deine Antwort: {error}")
         return False
-    except RateLimitError:
-        status("AI-Aufloesung durch Rate-Limit pausiert; nach Wartezeit erneut starten")
+    except RateLimitError as error:
+        status(f"AI-Auflösung durch Spotify Rate-Limit angehalten ({math.ceil(error.retry_after)}s); danach Skip zum Fortsetzen")
         return False
     except Exception as error:
-        status(f"AI-Aufloesung fehlgeschlagen ({type(error).__name__}); erneut versuchen")
+        status(f"AI-Auflösung fehlgeschlagen ({type(error).__name__}); erneut versuchen")
         return False
 
 
-def finish_song_request(device_id, reason="Songwuensche abgeschlossen"):
+def finish_song_request(device_id, reason="Songwünsche abgeschlossen"):
     """Do not let an explicit finite list spill into unrelated album tracks."""
     tracker.control = False
     now_playing["confirmed"] = False
@@ -1338,7 +1347,7 @@ def finish_song_request(device_id, reason="Songwuensche abgeschlossen"):
                 publish_playback(pb)
                 status(reason + "; Wiedergabe pausiert")
                 return
-        status(reason + "; Pause nicht bestaetigt, bitte Spotify pruefen")
+        status(reason + "; Pause nicht bestätigt, bitte Spotify prüfen")
     except Exception:
         publish_playback(None)
         status(reason + "; Spotify bitte manuell pausieren")
@@ -1396,14 +1405,14 @@ def prepare_next_track():
             return
     if ai and ai_request_plan is not None and ai_request_tracks_ready:
         _prepared_next = dict(owner=t["generation"], request=request, stop=True,
-                              reason="Passende AI-Titel fuer diese Anfrage ausgeschoepft")
+                              reason="Passende AI-Titel für diese Anfrage ausgeschöpft")
 
 
 def advance_to_next_track():
     global _prepared_next
     if prepared_next_is_current():
         if _prepared_next.get("stop"):
-            reason = _prepared_next.get("reason", "Songwuensche abgeschlossen")
+            reason = _prepared_next.get("reason", "Songwünsche abgeschlossen")
             _prepared_next = None
             finish_song_request(now_playing["device_id"], reason)
             return
@@ -1416,14 +1425,14 @@ def advance_to_next_track():
                 or (selection[3] and not ai_session.allows(ai_request_plan, selection[0], chosen, explicit=explicit))
                 or (not explicit and (normalize_title(chosen["name"]) in recent_titles
                                       or normalize_title(chosen["name"]) in ai_recent_titles))):
-            status("Vorbereiteter Titel nicht mehr gueltig; neuer DJ-Befehl erforderlich")
+            status("Vorbereiteter Titel nicht mehr gültig; neuer DJ-Befehl erforderlich")
             return
         try:
             start_selected(*selection, device_id=now_playing["device_id"])
         except RateLimitError:
-            status("Rate-Limit beim Uebergang; nach Wartezeit neuen DJ-Befehl senden")
+            status("Rate-Limit beim Übergang; nach Wartezeit neuen DJ-Befehl senden")
         except Exception as error:
-            status(f"Uebergang fehlgeschlagen ({type(error).__name__}); neuer DJ-Befehl erforderlich")
+            status(f"Übergang fehlgeschlagen ({type(error).__name__}); neuer DJ-Befehl erforderlich")
             publish_playback(None)
         return  # A failed start must never trigger a second fallback start.
     _prepared_next = None
@@ -1465,7 +1474,7 @@ def track_finished(allow_early=False):
     except Exception as error:
         tracker.gap()
         status("Rate-Limit; Playback unbekannt" if isinstance(error, RateLimitError)
-               else "Playback-Daten voruebergehend unbekannt")
+               else "Playback-Daten vorübergehend unbekannt")
         print("IS_PLAYING:false")
         publish_progress(None)
         return False
@@ -1487,7 +1496,7 @@ def track_finished(allow_early=False):
         _prepared_next = None
         judge_last_track(mode_switch=True)
         now_playing["confirmed"] = False
-        status("Manueller oder unklarer Wechsel; DJ freigegeben bis zum naechsten DJ-Befehl")
+        status("Manueller oder unklarer Wechsel; DJ freigegeben bis zum nächsten DJ-Befehl")
     elif event == "paused":
         status("Pausiert; auf Fortsetzen in Spotify warten")
     elif event == "unknown":
@@ -1539,7 +1548,7 @@ def run_dj():
                 ban_current_track()
 
             elif choice == "ban-artist":
-                log_section("Kuenstler sperren")
+                log_section("Künstler sperren")
                 ban_current_artist()
 
             elif choice == "1":
@@ -1597,19 +1606,19 @@ def run_dj():
                     ai_session.clear()
                     ai_recent_titles.clear()
                     publish_progress(None)
-                    status("AI-Session zurueckgesetzt; Steuerung freigegeben, neue Musikanfrage eingeben")
+                    status("AI-Session zurückgesetzt; Steuerung freigegeben, neue Musikanfrage eingeben")
                     continue
                 if not user_request:
                     print("  AI: empty request, ignoring.")
                 else:
                     print(f"  AI request: '{user_request}'")
                     try:
-                        ai_request_plan = ai_session.reconcile(ask_claude(user_request, ai_session.context()))
+                        ai_request_plan = ai_session.reconcile(ask_claude(user_request, ai_session.context()), user_request)
                         ai_session.accept(ai_request_plan, user_request)
                         artist_names = ai_request_plan.artists
                         print("  AI interpretation: " + ai_request_plan.summary())
                         print("  AI session: " + ("Folgeanfrage" if ai_request_plan.context_action == 'refine' else "Neue Musikauswahl")
-                              + f"; {len(ai_request_plan.excluded_artists)} Kuenstler-/{len(ai_request_plan.excluded_songs)} Song-Ausschluesse"
+                              + f"; {len(ai_request_plan.excluded_artists)} Künstler-/{len(ai_request_plan.excluded_songs)} Song-Ausschlüsse"
                               + ("; keine Session-Wiederholungen" if ai_request_plan.avoid_session_repeats else ""))
                         print(f"  AI suggested: {artist_names}")
 
@@ -1619,9 +1628,14 @@ def run_dj():
                             if name not in all_artists:
                                 all_artists[name] = entry["id"]
 
-                        resolved = resolve_artists_to_ids(sp, artist_names, all_artists)
+                        catalog_evidence = {n: entry.get('tracks', []) for n, entry in track_disk_cache.items()}
+                        catalog_evidence.update(artist_cache)
+                        resolved = resolve_artists_to_ids(
+                            sp, artist_names, all_artists,
+                            song_hints=ai_request_plan.artist_hints + ai_request_plan.songs,
+                            catalog_evidence=catalog_evidence)
                         if not resolved:
-                            status("AI: keine angefragten Kuenstler gefunden; neuer DJ-Befehl erforderlich")
+                            status("AI: keine angefragten Künstler gefunden; neuer DJ-Befehl erforderlich")
                         else:
                             # Store as the active AI pool and start playing
                             ai_pool.clear()
@@ -1641,13 +1655,18 @@ def run_dj():
 
                     except RequestValidationError as error:
                         ai_session.note_problem(user_request, str(error))
-                        status(f"AI: {error}")
+                        status(f"AI wartet auf deine Antwort: {error}")
+                    except ModelRateLimitError as error:
+                        status(f"Claude Rate-Limit (HTTP 429): {math.ceil(error.retry_after)}s warten; AI-Anfrage danach erneut senden")
+                    except RateLimitError as error:
+                        status(f"AI-Künstlersuche durch Spotify Rate-Limit angehalten ({math.ceil(error.retry_after)}s); AI-Anfrage danach erneut senden")
                     except Exception as e:
                         status(f"AI-Anfrage fehlgeschlagen ({type(e).__name__}); neuer DJ-Befehl erforderlich")
 
             # Clear ai_pool when any mode hotkey is pressed (1-5)
 
         # A fresh owned sample permits the agreed 1.5s early transition.
+        refresh_rate_limit_status()
         service_pending_start()
         observe_external_playback()
         if track_finished(allow_early=True):
@@ -1668,7 +1687,7 @@ def main():
     discovered_artists = load_discovered()
     inject_discovered_into_pools()
     sp = connect()
-    status("Bereit; Modus waehlen. Spotify darf beim Autostart noch geschlossen sein.")
+    status("Bereit; Modus wählen. Spotify darf beim Autostart noch geschlossen sein.")
     # Fetch catalogs on demand rather than flooding Spotify at Windows startup.
     while True:
         try:

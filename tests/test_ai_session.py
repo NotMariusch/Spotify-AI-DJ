@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from ai_session import AISession, is_session_reset
-from music_request import RequestValidationError, parse_music_request
+from music_request import RequestValidationError, parse_music_request, preserve_refinement_selection
 import ai_request
 import spotify_dj as dj
 from playback_state import PlaybackTracker
@@ -45,6 +45,39 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(plan.artists, ('Other',))
         self.assertEqual(plan.artist_scope, 'suggested')
 
+    def test_mood_change_preserves_free_selection_and_keeps_hints_out_of_queue(self):
+        self.accept(fixtures.request(artist_scope='suggested'))
+        incoming = fixtures.request(context_action='refine', selection='hits', mood='aggressive, hype',
+                                    songs=[dict(artist='Artist', title='HypeOne'), dict(artist='Artist', title='HypeTwo')])
+        plan = self.session.reconcile(incoming, 'more hype/aggressive')
+        self.assertEqual((plan.selection, plan.mood), ('any', 'aggressive, hype'))
+        self.assertEqual(plan.songs, ())
+        self.assertEqual([h.title for h in plan.artist_hints], ['HypeOne', 'HypeTwo'])
+
+    def test_mood_change_preserves_hits_when_model_suggests_free_selection(self):
+        previous = fixtures.request(selection='hits', songs=[dict(artist='Artist', title='Old')])
+        incoming = fixtures.request(context_action='refine', mood='aggressive', songs=[dict(artist='Artist', title='New')])
+        plan = preserve_refinement_selection(incoming, previous, 'more hype/aggressive')
+        self.assertEqual(plan.selection, 'hits')
+        self.assertEqual(plan.songs[0].title, 'New')
+
+    def test_explicit_selection_changes_still_work_in_both_directions(self):
+        self.accept(fixtures.request(selection='hits', songs=[dict(artist='Artist', title='Old')]))
+        free = self.session.reconcile(fixtures.request(context_action='refine'), 'use the full catalog')
+        self.assertEqual(free.selection, 'any')
+        hits = preserve_refinement_selection(fixtures.request(context_action='refine',
+            songs=[dict(artist='Artist', title='Hit')]), fixtures.request(), 'more hits please')
+        self.assertEqual(hits.selection, 'hits')
+        self.assertEqual(preserve_refinement_selection(hits, self.session.plan, 'keine Hits').selection, 'any')
+
+    def test_identity_hints_are_validated_and_do_not_create_song_wishes(self):
+        plan = fixtures.request(artist_hints=[dict(artist='Artist', title='First'), dict(artist='Artist', title='Second')])
+        self.assertEqual(plan.songs, ())
+        self.assertEqual(len(plan.artist_hints), 2)
+        for hints in ([dict(artist='Other', title='First')], [dict(artist='Artist', title='First', id='invented')]):
+            with self.assertRaises(RequestValidationError):
+                fixtures.request(artist_hints=hints)
+
     def test_followup_cannot_silently_change_existing_period(self):
         self.accept()
         with self.assertRaises(RequestValidationError):
@@ -67,7 +100,7 @@ class SessionTests(unittest.TestCase):
             self.session.reconcile(fixtures.request(context_action='refine'))
 
     def test_pending_clarification_and_last_song_are_available_without_ids(self):
-        self.session.note_problem('Play Hello', 'Welchen Kuenstler meinst du?')
+        self.session.note_problem('Play Hello', 'Welchen Künstler meinst du?')
         self.session.record_play('Artist', fixtures.song())
         context = self.session.context()
         self.assertEqual(context['pending']['request'], 'Play Hello')
@@ -152,7 +185,7 @@ class SessionTests(unittest.TestCase):
 
     def test_model_receives_bounded_context_and_clarification_answer(self):
         self.accept()
-        self.session.note_problem('Play Hello', 'Welcher Kuenstler?')
+        self.session.note_problem('Play Hello', 'Welcher Künstler?')
         response = Mock()
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
@@ -167,6 +200,111 @@ class SessionTests(unittest.TestCase):
         self.assertIn('Adele', content)
         self.assertIn('2000', content)
         self.assertNotIn('spotify:', content)
+
+
+def model_response(data):
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.read.return_value = json.dumps(dict(content=[dict(text=json.dumps(data))])).encode()
+    return response
+
+
+class IncompleteRefinementTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        self.stack.enter_context(patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}))
+        self.http = self.stack.enter_context(patch.object(ai_request.urllib.request, 'urlopen'))
+        self.session = AISession()
+        self.previous = fixtures.request(selection='hits', artist_scope='suggested',
+                                        songs=[dict(artist='Artist', title='Hit')])
+        self.session.accept(self.previous, '2000s pop from my childhood please')
+
+    def test_free_gaming_selection_ignores_model_hit_switch_without_repair_call(self):
+        self.session.accept(fixtures.request(artist_scope='suggested', year_start=None, year_end=None,
+                                            style='gaming music', mood='focused'), 'Music to game to')
+        data = asdict(fixtures.request(context_action='refine', year_start=None,
+                                      year_end=None, style='gaming music', mood='aggressive, hype'))
+        data.update(selection='hits', songs=[])
+        self.http.return_value = model_response(data)
+        plan = ai_request.ask_claude('more hype/aggressive', self.session.context())
+        self.assertEqual(plan.selection, 'any')
+        self.assertEqual(plan.mood, 'aggressive, hype')
+        self.assertEqual(plan.songs, ())
+        self.http.assert_called_once()
+
+    def test_filter_only_update_reuses_existing_hints_without_second_model_call(self):
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[], avoid_session_repeats=True)
+        self.http.return_value = model_response(data)
+        plan = self.session.reconcile(ai_request.ask_claude('Heute keine Wiederholungen von vorhin', self.session.context()))
+        self.assertEqual(plan.songs, self.previous.songs)
+        self.assertEqual(plan.mood, self.previous.mood)
+        self.assertEqual((plan.year_start, plan.year_end), (2000, 2009))
+        self.assertTrue(plan.avoid_session_repeats)
+        self.http.assert_called_once()
+
+    def test_hype_update_repairs_missing_hints_once_and_keeps_years_and_artists(self):
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[], mood='aggressive, hype', year_start=None, year_end=None)
+        self.http.side_effect = [model_response(data), model_response(dict(
+            songs=[dict(artist='Artist', title='HypeHit')], mood='aggressive, hype'))]
+        plan = self.session.reconcile(ai_request.ask_claude('Mehr davon, aber mehr aggressiv/hype', self.session.context()))
+        self.assertEqual(plan.songs[0].title, 'HypeHit')
+        self.assertEqual(plan.mood, 'aggressive, hype')
+        self.assertEqual((plan.year_start, plan.year_end), (2000, 2009))
+        self.assertEqual(plan.artists, self.previous.artists)
+        self.assertEqual(self.http.call_count, 2)
+        repair = json.loads(self.http.call_args.args[0].data)
+        self.assertIn('Mehr davon, aber mehr aggressiv/hype', repair['messages'][0]['content'])
+
+    def test_unchanged_model_mood_does_not_make_hype_request_filter_only(self):
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[])
+        self.http.side_effect = [model_response(data), model_response(dict(
+            songs=[dict(artist='Artist', title='NewHypeHit')], mood='more aggressive and energetic'))]
+        plan = ai_request.ask_claude('Mehr davon, aber mehr aggressiv/hype', self.session.context())
+        self.assertEqual(plan.mood, 'more aggressive and energetic')
+        self.assertEqual(plan.songs[0].title, 'NewHypeHit')
+        self.assertEqual(self.http.call_count, 2)
+
+    def test_invalid_repair_stops_after_one_attempt_without_changing_session(self):
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[], mood='hype')
+        self.http.side_effect = [model_response(data), model_response(dict(songs=[], mood='hype'))]
+        with self.assertRaises(RequestValidationError):
+            ai_request.ask_claude('more of that but hype', self.session.context())
+        self.assertEqual(self.http.call_count, 2)
+        self.assertEqual(self.session.plan, self.previous)
+
+    def test_repair_cannot_inject_artist_or_spotify_ids(self):
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[], mood='hype')
+        self.http.side_effect = [model_response(data), model_response(dict(
+            songs=[dict(artist='Other', title='Hit', uri='invented')], mood='hype'))]
+        with self.assertRaises(RequestValidationError):
+            ai_request.ask_claude('more of that but hype', self.session.context())
+        self.assertEqual(self.http.call_count, 2)
+
+    def test_no_empty_hits_relaxation_for_explicit_song_wishes_or_new_requests(self):
+        for kind, action in [('songs', 'refine'), ('discovery', 'new')]:
+            data = asdict(self.previous)
+            data.update(kind=kind, context_action=action, songs=[])
+            self.http.return_value = model_response(data)
+            self.http.reset_mock()
+            with self.subTest(kind=kind), self.assertRaises(RequestValidationError):
+                ai_request.ask_claude('a concrete song request', self.session.context())
+            self.http.assert_called_once()
+
+    def test_empty_refinement_without_previous_pool_does_not_trigger_repair(self):
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[])
+        self.http.return_value = model_response(data)
+        with self.assertRaises(RequestValidationError):
+            ai_request.ask_claude('more of that', AISession().context())
+        self.http.assert_called_once()
 
 
 class PlaybackSessionTests(unittest.TestCase):
@@ -221,6 +359,60 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(dj.memory, before)
         for name in ('save_memory', 'save_recent', 'save_banned', 'save_banned_artists'):
             getattr(dj, name).assert_not_called()
+
+    def test_hype_then_no_repeats_keeps_new_mood_and_never_learns(self):
+        first = fixtures.request(selection='hits', artist_scope='suggested', songs=[dict(artist='Artist', title='Hit')])
+        hype = asdict(first)
+        hype.update(context_action='refine', mood='aggressive, hype', songs=[])
+        filters = dict(hype, avoid_session_repeats=True)
+        repair = dict(songs=[dict(artist='Artist', title='HypeOne'), dict(artist='Artist', title='HypeTwo')], mood='aggressive, hype')
+        dj.artist_cache['Artist'] = [fixtures.song(), fixtures.song('HypeOne'), fixtures.song('HypeTwo')]
+        before = copy.deepcopy(dj.memory)
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
+                patch.object(ai_request.urllib.request, 'urlopen', side_effect=[
+                    model_response(asdict(first)), model_response(hype), model_response(repair), model_response(filters)]) as http, \
+                patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
+            self.commands(['ai:2000s pop from my childhood please', 'ai:Mehr davon, aber mehr aggressiv/hype',
+                           'ai:Heute keine Wiederholungen von vorhin'])
+        self.assertEqual(http.call_count, 4)
+        self.assertEqual(self.start.call_count, 3)
+        self.assertEqual(dj.ai_request_plan.mood, 'aggressive, hype')
+        self.assertTrue(dj.ai_request_plan.avoid_session_repeats)
+        self.assertEqual(dj.memory, before)
+        self.assertNotEqual(self.start.call_args_list[1].kwargs['offset']['uri'], self.start.call_args_list[2].kwargs['offset']['uri'])
+        dj.save_memory.assert_not_called()
+        dj.save_recent.assert_not_called()
+
+    def test_gaming_hype_refinement_keeps_free_catalog_beyond_suggested_hits(self):
+        first = fixtures.request(artist_scope='suggested', style='gaming music', year_start=None, year_end=None)
+        hype = asdict(fixtures.request(context_action='refine', artist_scope='suggested', selection='hits',
+            style='gaming music', mood='aggressive, hype', year_start=None, year_end=None,
+            songs=[dict(artist='Artist', title='HypeOne'), dict(artist='Artist', title='HypeTwo')]))
+        self.fetch.return_value = [fixtures.song('HypeOne'), fixtures.song('HypeTwo'), fixtures.song('DeepCut')]
+        before = copy.deepcopy(dj.memory)
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
+                patch.object(ai_request.urllib.request, 'urlopen', side_effect=[model_response(asdict(first)), model_response(hype)]) as http, \
+                patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
+            self.commands(['ai:Music to game to', 'ai:more hype/aggressive'])
+        self.assertEqual(http.call_count, 2)
+        self.assertEqual(dj.ai_request_plan.selection, 'any')
+        self.assertEqual(dj.ai_request_plan.mood, 'aggressive, hype')
+        self.assertEqual(dj.ai_song_queue, [])
+        self.assertEqual({t['name'] for t in dj.ai_session_catalogs['Artist']}, {'HypeOne', 'HypeTwo', 'DeepCut'})
+        self.assertEqual(dj.memory, before)
+        dj.save_memory.assert_not_called()
+        dj.save_recent.assert_not_called()
+
+    def test_real_resolver_receives_identity_anchors_and_cached_catalog(self):
+        plan = fixtures.request(artist_hints=[dict(artist='Artist', title='First'), dict(artist='Artist', title='Second')])
+        dj.artist_cache['Artist'] = [fixtures.song('First'), fixtures.song('Second')]
+        self.sp.search.return_value = dict(artists=dict(items=[dict(name='Artist', id='wrong'), dict(name='Artist', id='artist')]))
+        with patch.object(dj, 'ask_claude', return_value=plan):
+            self.commands(['ai:Music to game to'])
+        self.assertEqual(dj.ai_pool, [('Artist', 'artist')])
+        self.sp.search.assert_called_once()
+        self.assertEqual(self.start.call_count, 1)
+        dj.save_memory.assert_not_called()
 
     def test_failed_start_does_not_enter_session_history(self):
         dj.ai_request_plan = fixtures.request()
@@ -277,7 +469,7 @@ class PlaybackSessionTests(unittest.TestCase):
     def test_clarification_keeps_original_request_for_next_answer(self):
         dj.artist_cache['Artist'] = [fixtures.song()]
         plan = fixtures.request(kind='songs', songs=[dict(artist='Artist', title='Hit')])
-        with patch.object(dj, 'ask_claude', side_effect=[RequestValidationError('Rueckfrage: Welcher Kuenstler?'), plan]) as ask, \
+        with patch.object(dj, 'ask_claude', side_effect=[RequestValidationError('Rückfrage: Welcher Künstler?'), plan]) as ask, \
                 patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
             self.commands(['ai:Play Hit', 'ai:Artist'])
         context = ask.call_args_list[1].args[1]

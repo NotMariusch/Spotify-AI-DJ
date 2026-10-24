@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 import wave
@@ -23,12 +24,15 @@ class VoiceTests(unittest.TestCase):
         self.folder = self.stack.enter_context(tempfile.TemporaryDirectory(prefix='.voice-test-', dir=ROOT))
         self.stack.enter_context(patch.object(voice.tempfile, 'tempdir', self.folder))
         self.log = self.stack.enter_context(patch.object(voice, 'log_to_server'))
+        self.real_send = voice.send_command
         self.send = self.stack.enter_context(patch.object(voice, 'send_command'))
         self.device = self.stack.enter_context(patch.object(voice.sd, 'InputStream'))
         self.stack.enter_context(patch.object(voice, 'recording', False))
         self.stack.enter_context(patch.object(voice, 'processing', False))
         self.stack.enter_context(patch.object(voice, 'stream', None))
         self.stack.enter_context(patch.object(voice, 'frames', []))
+        self.stack.enter_context(patch.object(voice, 'closing', threading.Event()))
+        self.stack.enter_context(patch.object(voice, 'shutdown_notice', None))
 
     def test_microphone_start_failure_resets_state_and_can_retry(self):
         self.device.return_value.start.side_effect = RuntimeError('unavailable')
@@ -40,6 +44,32 @@ class VoiceTests(unittest.TestCase):
         self.device.return_value.start.side_effect = None
         voice.on_hotkey()
         self.assertTrue(voice.recording)
+
+    def test_shutdown_notice_stops_voice_and_prevents_new_recordings(self):
+        notice = Mock()
+        notice.changed.return_value = True
+        voice.shutdown_notice = notice
+        voice.on_hotkey()
+        self.assertTrue(voice.closing.is_set())
+        self.device.assert_not_called()
+
+    def test_voice_loop_removes_hotkey_when_shutdown_is_requested(self):
+        if voice.IS_LINUX:
+            self.skipTest('Windows hotkey client')
+        with patch.object(voice.keyboard, 'add_hotkey', return_value='fixture-hook'), \
+                patch.object(voice.keyboard, 'remove_hotkey') as remove, \
+                patch.object(voice, 'stopping', return_value=True):
+            voice.run_voice()
+        remove.assert_called_once_with('fixture-hook')
+
+    def test_late_transcription_cannot_overwrite_quit_command(self):
+        path = Path(self.folder) / 'dj_input.txt'
+        path.write_text('quit', encoding='utf-8')
+        voice.shutdown_notice = Mock()
+        voice.shutdown_notice.changed.return_value = True
+        with patch.object(voice, 'INPUT_FILE', path):
+            self.real_send('ai:late result')
+        self.assertEqual(path.read_text(), 'quit')
 
     def test_recording_to_ai_command_without_microphone_or_recognition_network(self):
         voice.on_hotkey()

@@ -91,6 +91,7 @@ test('dashboard updates bar and accessibility labels, clears on disconnect', () 
   assert.equal(element('progress-elapsed').textContent, '0:52');
   handlers.disconnect();
   assert.equal(element('progress-elapsed').textContent, '--:--');
+  assert.equal(element('dj-status').textContent, 'Verbindung zum DJ unterbrochen');
   assert.equal(element('progress-fill').style.transform, 'scaleX(0)');
   assert.equal(element('progress-rail').attributes['aria-valuenow'], undefined);
   handlers.dj_log({ lines: ['--- Modus: German Trap ---', '--- Neuer Song ---',
@@ -101,4 +102,7 @@ test('dashboard updates bar and accessibility labels, clears on disconnect', () 
   assert.equal(log[1].textContent, 'Neuer Song');
   assert.equal(log[2].className, 'log-line dj-pick');
   assert.equal(log[3].className, 'log-line filter');
+  handlers.state({ shutting_down: true, status: 'DJ und Dashboard werden beendet' });
+  handlers.disconnect();
+  assert.match(element('dj-status').textContent, /DJ und Dashboard beendet/);
 });

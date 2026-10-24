@@ -36,6 +36,7 @@ BASE_DIR   = Path(__file__).resolve().parent.parent
 INPUT_FILE = BASE_DIR / "data" / "dj_input.txt"
 sys.path.insert(0, str(BASE_DIR / "src"))
 from instance_lock import InstanceLock
+from shutdown_signal import ShutdownNotice
 
 SAMPLE_RATE = 16000
 CHANNELS    = 1
@@ -46,9 +47,19 @@ stream       = None
 frames_lock  = threading.Lock()
 toggle_lock  = threading.Lock()
 processing   = False
+shutdown_notice = None
+closing = threading.Event()
+
+
+def stopping():
+    if shutdown_notice is not None and shutdown_notice.changed():
+        closing.set()
+    return closing.is_set()
 
 
 def send_command(text: str):
+    if stopping():
+        return
     with open(INPUT_FILE, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -101,7 +112,7 @@ def transcribe(wav_path: str):
         return None
     except sr.RequestError as e:
         print(f"  Speech recognition error: {e}")
-        log_to_server("Spracherkennung nicht erreichbar. Internetverbindung pruefen.")
+        log_to_server("Spracherkennung nicht erreichbar. Internetverbindung prüfen.")
         return None
 
 
@@ -181,6 +192,8 @@ def finish_recording():
 
 
 def on_hotkey():
+    if stopping():
+        return
     global recording, processing
     with toggle_lock:
         if processing:
@@ -190,7 +203,7 @@ def on_hotkey():
                 start_recording()
             except Exception as error:
                 print(f"  Microphone failed: {type(error).__name__}")
-                log_to_server("Mikrofon nicht verfuegbar. Windows-Mikrofonzugriff und Standard-Eingabegeraet pruefen.", recording_state=False)
+                log_to_server("Mikrofon nicht verfügbar. Windows-Mikrofonzugriff und Standard-Eingabegerät prüfen.", recording_state=False)
         else:
             recording = False
             processing = True
@@ -214,7 +227,7 @@ def run_voice():
         print("  Listening for voice-toggle command (via dj_hotkey_linux.py)...")
         print()
         try:
-            while True:
+            while not stopping():
                 if INPUT_FILE.exists():
                     try:
                         content = INPUT_FILE.read_text().strip()
@@ -228,25 +241,32 @@ def run_voice():
             print("\nClosing voice mode.")
             sys.exit(0)
     else:
-        keyboard.add_hotkey("f13+v", on_hotkey, suppress=True)
+        hotkey = keyboard.add_hotkey("f13+v", on_hotkey, suppress=True)
         log_to_server("Voice bereit: F13 + V startet/stoppt die Aufnahme.", recording_state=False)
         print("  Listening for F13+V...")
         print()
         try:
-            keyboard.wait()
+            while not stopping():
+                closing.wait(.25)
         except KeyboardInterrupt:
             print("\nClosing voice mode.")
             sys.exit(0)
+        finally:
+            keyboard.remove_hotkey(hotkey)
 
 
 def main():
+    global shutdown_notice
     lock = InstanceLock(str(BASE_DIR / "data" / "voice.lock"))
     if not lock.acquire():
         print("Voice mode is already running.")
         return
     try:
+        closing.clear()
+        shutdown_notice = ShutdownNotice(BASE_DIR / 'data' / 'shutdown.signal')
         run_voice()
     finally:
+        closing.set()
         if stream:
             stream.close()
         log_to_server("Voice beendet.", recording_state=False)
