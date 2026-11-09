@@ -47,6 +47,9 @@ class MusicRequest:
     excluded_songs: tuple = ()
     avoid_session_repeats: bool = False
     artist_hints: tuple = ()  # Identity anchors only, never a playback queue.
+    repeat_policy: str = 'inherit'  # inherit, recent, session, allow; temporary only.
+    less_artists: tuple | None = None  # None inherits; () explicitly clears soft preferences.
+    less_songs: tuple | None = None
 
     def summary(self):
         period = f'{self.year_start}–{self.year_end}' if self.year_start is not None else 'ohne Jahresgrenze'
@@ -58,7 +61,7 @@ class MusicRequest:
 
 def parse_music_request(data, allow_empty_hit_refinement=False):
     fields = {'kind', 'artists', 'songs', 'year_start', 'year_end', 'style', 'mood', 'selection', 'continue_similar'}
-    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats', 'artist_hints'}
+    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats', 'artist_hints', 'repeat_policy', 'less_artists', 'less_songs'}
     if not isinstance(data, dict) or set(data) - fields - optional or not fields <= set(data):
         raise RequestValidationError('Ungültige strukturierte AI-Antwort; bitte erneut versuchen.')
     clarification = data.get('clarification')
@@ -117,6 +120,9 @@ def parse_music_request(data, allow_empty_hit_refinement=False):
     avoid = data.get('avoid_session_repeats', False)
     if type(avoid) is not bool:
         raise RequestValidationError('Ungültige Wiederholungsregel.')
+    repeat_policy = data.get('repeat_policy', 'inherit')
+    if repeat_policy not in ('inherit', 'recent', 'session', 'allow'):
+        raise RequestValidationError('Unbekannte Wiederholungsregel.')
     excluded = data.get('excluded_artists', [])
     if not isinstance(excluded, list) or len(excluded) > 24 or any(
             not isinstance(n, str) or not 1 <= len(n.strip()) <= 120 or not artist_key(n) for n in excluded):
@@ -131,24 +137,71 @@ def parse_music_request(data, allow_empty_hit_refinement=False):
                 or not artist_key(song['artist']) or not song_key(song['title'])):
             raise RequestValidationError('Ausgeschlossene Songs brauchen Künstler und Titel, keine Spotify-IDs.')
         excluded_wishes.append(SongWish(song['artist'].strip(), song['title'].strip()))
+    less_artists = data.get('less_artists')
+    if less_artists is not None:
+        if (not isinstance(less_artists, list) or len(less_artists) > 24 or any(
+                not isinstance(n, str) or not 1 <= len(n.strip()) <= 120 or not artist_key(n) for n in less_artists)):
+            raise RequestValidationError('Ungültige Künstler für die temporäre Weniger-Auswahl.')
+        less_artists = tuple(dict.fromkeys(n.strip() for n in less_artists))
+    less_songs = data.get('less_songs')
+    if less_songs is not None:
+        if not isinstance(less_songs, list) or len(less_songs) > 40:
+            raise RequestValidationError('Ungültige Songs für die temporäre Weniger-Auswahl.')
+        wishes = []
+        for song in less_songs:
+            if (not isinstance(song, dict) or set(song) != {'artist', 'title'} or any(
+                    not isinstance(song[k], str) or not 1 <= len(song[k].strip()) <= 200 for k in song)
+                    or not artist_key(song['artist']) or not song_key(song['title'])):
+                raise RequestValidationError('Die Weniger-Auswahl braucht Künstler und Titel, keine Spotify-IDs.')
+            wishes.append(SongWish(song['artist'].strip(), song['title'].strip()))
+        less_songs = tuple(wishes)
     return MusicRequest(data['kind'], artists, tuple(parsed), start, end,
                         data['style'].strip(), data['mood'].strip(), data['selection'], data['continue_similar'],
-                        action, scope, tuple(dict.fromkeys(n.strip() for n in excluded)), tuple(excluded_wishes), avoid, tuple(parsed_hints))
+                        action, scope, tuple(dict.fromkeys(n.strip() for n in excluded)), tuple(excluded_wishes), avoid, tuple(parsed_hints), repeat_policy,
+                        less_artists, less_songs)
+
+
+def repeat_policy_from_text(text):
+    """Recognize explicit repeat commands without treating 'more songs' as one."""
+    text = text.casefold().replace('’', "'")
+    if re.search(r'\b(?:nur\s+einmal|(?:just|only)\s+once|one\s+pass|no\s+loops?)\b', text):
+        return 'session'
+    if re.search(r"\b(?:don'?t|do\s+not)\s+(?:allow|permit|want)\s+(?:any\s+)?repeats?\b"
+                 r'|\b(?:keine|nicht)\s+wiederholungen\s+(?:erlauben|zulassen)\b', text):
+        return 'session'
+    if re.search(r"\b(?:i\s+)?(?:don'?t|do\s+not)\s+(?:care|mind)\s+(?:about\s+)?repeats?\b"
+                 r'|\b(?:allow|enable|permit)\s+(?:song\s+)?repeats?\b'
+                 r'|\brepeats?\s+(?:are\s+)?(?:ok(?:ay)?|allowed|fine)\b'
+                 r'|\b(?:same\s+songs?|same\s+tracks?)\s+(?:again|on\s+repeat)\b'
+                 r'|\b(?:wiederholungen|repeats)\s+(?:sind\s+)?(?:wieder\s+)?(?:erlauben|zulassen|egal|erlaubt|okay|ok)\b'
+                 r'|\b(?:mir\s+sind\s+)?wiederholungen\s+egal\b'
+                 r'|\b(?:dieselben|die\s+gleichen)\s+(?:songs|lieder|titel)\s+(?:noch\s*mal|wieder)\b', text):
+        return 'allow'
+    if re.search(r'\b(?:no|without)\s+(?:song\s+)?repeats?\b'
+                 r'|\b(?:avoid|disable)\s+repeats?\b'
+                 r'|\b(?:keine|ohne)\s+wiederholungen\b'
+                 r'|\bwiederholungen\s+(?:vermeiden|verbieten)\b', text):
+        return 'session'
+    return None
 
 
 def preserve_refinement_selection(plan, previous, user_text):
     """Mood/filter refinements inherit the selection rule in both directions."""
-    if not previous or plan.context_action != 'refine' or plan.kind != 'discovery' or previous.kind != 'discovery':
+    if plan.kind != 'discovery':
         return plan
     text = user_text.casefold()
     if re.search(r'\b(no|not|keine?|ohne)\s+(?:bekannte\s+|popular\s+)?hits?\b'
                  r'|\b(deep[ -]?cuts?|album[ -]?tracks?|b[ -]?seiten)\b'
                  r'|\b(full|whole|entire)\s+catalog(?:ue)?\b'
+                 r'|\b(?:all|every)\s+(?:the\s+)?(?:songs?|tracks?)\b'
+                 r'|\b(?:alle|sämtliche)\s+(?:songs|lieder|titel)\b'
                  r'|\b(gesamte[rn]?|ganze[rn]?)\s+katalog\b|\bfreie\s+titelauswahl\b', text):
         selection = 'any'
     elif re.search(r'\b(hits?|bangers?|classics?|klassiker)\b', text):
         selection = 'hits'
     else:
+        if not previous or plan.context_action != 'refine' or previous.kind != 'discovery':
+            return plan
         selection = previous.selection
     if selection == 'any':
         # Generated hit hints must not become a restricted pool or trigger track

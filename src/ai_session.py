@@ -1,8 +1,9 @@
 """Process-local conversation and listening context. No persistence or learning."""
 from collections import OrderedDict, deque
 from dataclasses import asdict, replace
+import re
 
-from music_request import RequestValidationError, artist_key, song_key, preserve_refinement_selection
+from music_request import RequestValidationError, artist_key, song_key, preserve_refinement_selection, repeat_policy_from_text
 
 
 def is_session_reset(text):
@@ -29,6 +30,11 @@ class AISession:
         self.excluded_artists = ()
         self.excluded_songs = ()
         self.avoid_repeats = False
+        self.repeat_policy = 'allow'
+        self.less_artists = ()
+        self.less_songs = ()
+        self.recent_music = deque(maxlen=12)
+        self.track_plays = OrderedDict()
 
     def leave_ai(self):
         # A normal mode ends the old conversation topic, not the listening session.
@@ -43,6 +49,10 @@ class AISession:
                     excluded_artists=list(self.excluded_artists),
                     excluded_songs=[asdict(s) for s in self.excluded_songs],
                     avoid_session_repeats=self.avoid_repeats,
+                    repeat_policy=self.repeat_policy,
+                    less_artists=list(self.less_artists),
+                    less_songs=[asdict(s) for s in self.less_songs],
+                    recent_music=list(self.recent_music),
                     heard_recordings=len(self.heard))
 
     def note_problem(self, user_text, message):
@@ -74,8 +84,20 @@ class AISession:
         songs = {(artist_key(s.artist), song_key(s.title)): s for s in self.excluded_songs + plan.excluded_songs}
         if len(excluded) > 24 or len(songs) > 40:
             raise RequestValidationError('Zu viele Session-Ausschlüsse; mit "Neue AI-Session" zurücksetzen.')
+        explicit_policy = repeat_policy_from_text(user_text or '')
+        policy = explicit_policy or plan.repeat_policy
+        if user_text is not None and explicit_policy is None:
+            # A mood/artist preference alone cannot silently enable a repeat
+            # block. Explicit semantic repeat requests may still use the model.
+            if not re.search(r'\b(repeat\w*|wiederhol\w*|again|nochmal|twice|doppelt|zweimal|einmal|once|playlist|loop\w*)\b', user_text, re.I):
+                policy = 'inherit'
+                plan = replace(plan, avoid_session_repeats=False)
+        if policy == 'inherit':
+            policy = 'session' if plan.avoid_session_repeats else self.repeat_policy
         plan = replace(plan, excluded_artists=tuple(excluded.values()), excluded_songs=tuple(songs.values()),
-                       avoid_session_repeats=self.avoid_repeats or plan.avoid_session_repeats)
+                       repeat_policy=policy, avoid_session_repeats=policy == 'session',
+                       less_artists=self.less_artists if plan.less_artists is None else plan.less_artists,
+                       less_songs=self.less_songs if plan.less_songs is None else plan.less_songs)
         artists = tuple(n for n in plan.artists if artist_key(n) not in excluded)
         if plan.kind == 'songs' and (len(artists) != len(plan.artists) or any(
                 (artist_key(s.artist), song_key(s.title)) in songs for s in plan.songs)):
@@ -91,21 +113,43 @@ class AISession:
         self.plan = plan
         self.excluded_artists = plan.excluded_artists
         self.excluded_songs = plan.excluded_songs
-        self.avoid_repeats = plan.avoid_session_repeats
+        self.repeat_policy = (plan.repeat_policy if plan.repeat_policy != 'inherit'
+                              else 'session' if plan.avoid_session_repeats else self.repeat_policy)
+        self.avoid_repeats = self.repeat_policy == 'session'
+        if plan.less_artists is not None:
+            self.less_artists = plan.less_artists
+        if plan.less_songs is not None:
+            self.less_songs = plan.less_songs
         self.turns.append(user_text[:1000])
         self.pending = None
 
-    def record_play(self, name, track):
+    def record_play(self, name, track, count_start=False):
         """Call only for confirmed DJ starts or an observed playing external track."""
         title = track.get('name')
         if not isinstance(title, str) or not song_key(title):
             return
         self.last_song = dict(artist=name, title=title)
+        if not self.recent_music or self.recent_music[-1] != self.last_song:
+            self.recent_music.append(dict(self.last_song))
         for key in self.track_keys(name, track):
             self.heard[key] = None
             self.heard.move_to_end(key)
+            if count_start:
+                self.track_plays[key] = self.track_plays.get(key, 0) + 1
+                self.track_plays.move_to_end(key)
         while len(self.heard) > self.HISTORY_LIMIT:
             self.heard.popitem(last=False)
+        while len(self.track_plays) > self.HISTORY_LIMIT:
+            self.track_plays.popitem(last=False)
+
+    def artist_reduced(self, plan, name):
+        return bool(plan and artist_key(name) in {artist_key(n) for n in (plan.less_artists or ())})
+
+    def song_preference_rank(self, plan, name, track):
+        keys = self.track_keys(name, track)
+        count = max((self.track_plays.get(key, 0) for key in keys), default=0)
+        reduced = bool(plan and (keys & {(artist_key(s.artist), song_key(s.title)) for s in (plan.less_songs or ())}))
+        return count * 4 + 3 if reduced else count
 
     @staticmethod
     def track_keys(name, track):

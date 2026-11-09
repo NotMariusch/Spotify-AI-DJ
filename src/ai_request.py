@@ -12,7 +12,7 @@ import urllib.error
 import math
 import re
 from dataclasses import asdict, replace
-from music_request import MusicRequest, RequestValidationError, artist_key, song_key, parse_music_request, check_explicit_period, check_request_kind, preserve_refinement_selection
+from music_request import MusicRequest, RequestValidationError, artist_key, song_key, parse_music_request, check_explicit_period, check_request_kind, preserve_refinement_selection, repeat_policy_from_text
 
 
 class ModelRateLimitError(Exception):
@@ -20,8 +20,27 @@ class ModelRateLimitError(Exception):
         self.retry_after = retry_after
 
 
+def _repeat_rule_only(text):
+    return re.fullmatch(
+        r'(?:heute\s+)?(?:bitte\s+)?keine\s+wiederholungen(?:\s+von\s+vorhin)?[.!?]*'
+        r'|(?:today\s+)?(?:please\s+)?no\s+repeats(?:\s+from\s+earlier)?(?:\s+please)?[.!?]*'
+        r'|(?:please\s+)?(?:allow|enable|permit)\s+repeats?(?:\s+please)?[.!?]*'
+        r"|(?:i\s+)?(?:don'?t|do\s+not)\s+(?:care|mind)\s+(?:about\s+)?repeats?[.!?]*"
+        r'|(?:bitte\s+)?wiederholungen\s+(?:sind\s+)?(?:wieder\s+)?(?:erlauben|zulassen|erlaubt|egal)[.!?]*'
+        r'|(?:play\s+)?(?:the\s+)?same\s+songs?\s+again[.!?]*'
+        r'|(?:spiel(?:e)?\s+)?(?:dieselben|die\s+gleichen)\s+songs\s+(?:noch\s*mal|wieder)[.!?]*',
+        text.strip().replace('’', "'"), flags=re.I)
+
+
 def ask_claude(user_request: str, session_context=None) -> MusicRequest:
     """Interpret a wish without sending Spotify catalog data to the model."""
+    previous_data = (session_context or {}).get('active_request')
+    previous = parse_music_request(json.loads(json.dumps(previous_data))) if previous_data else None
+    repeat_policy = repeat_policy_from_text(user_request)
+    if previous and previous.kind == 'discovery' and repeat_policy and _repeat_rule_only(user_request):
+        print('  AI: Wiederholungsregel geändert; bestehende Musikauswahl bleibt erhalten.')
+        return replace(previous, context_action='refine', repeat_policy=repeat_policy,
+                       avoid_session_repeats=repeat_policy == 'session')
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
@@ -35,6 +54,18 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
         "\"selection\":\"any\"|\"hits\", \"continue_similar\":boolean}. "
         "Also output context_action (new|refine), artist_scope (fixed|suggested), excluded_artists ([names]), "
         "excluded_songs ([{artist,title}]), avoid_session_repeats (boolean). "
+        "Also output repeat_policy: inherit|recent|session|allow. Use inherit when not changing the rule; "
+        "session for no-repeat wishes, allow for 'I dont care about repeats', 'allow repeats', "
+        "'same songs again' or playlist-style repeating. recent restores ordinary recent-song avoidance. "
+        "Allowing repeats sets avoid_session_repeats=false and NEVER clears artist/song exclusions. "
+        "AI discovery defaults to allow: build a broad music pool and keep it playing until a new request. "
+        "Do not enable recent/session blocking just because the user wants more variety or less of a style. "
+        "Also output less_artists ([names]|null) and less_songs ([{artist,title}]|null): temporary SOFT "
+        "preferences, not bans. Null inherits, [] clears; full arrays replace the previous soft selection. "
+        "For 'weniger von dem wie vorhin' or 'less of that earlier music', use recent_music and prior "
+        "requests to identify the relevant artists/songs/style. Do not invent listening history. "
+        "If the referent is materially unclear, ask a short clarification. Less does not mean no repeats. "
+        "Preserve soft preferences on unrelated follow-ups; explicit 'more of X' can remove X from them. "
         "Also include artist_hints: up to two well-known real SONG titles per artist as [{artist,title}]. "
         "These are identity anchors to distinguish same-name Spotify profiles, never a playback queue. "
         "Do not use album names as song titles. They do not restrict free catalog selection. "
@@ -54,13 +85,18 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
         "- For genres/moods/activities use discovery and 5-8 suitable artists, strictly matching the style. "
         "Never add artists outside an explicit artist restriction.\n"
         "- Hits, bangers, classics or nostalgia/childhood requests use selection=hits. For broad decade-pop "
-        "requests favor recognizable hits. Provide 16-32 well-known concrete song suggestions across the "
-        "selected artists (when possible at least two per artist), respecting the requested era and style. "
+        "requests favor recognizable hits. Aim for 32-40 well-known concrete song suggestions across the "
+        "selected artists (when possible four or more per artist), respecting the requested era and style. "
+        "Prefer a broad matching pool; never pad it with invented, out-of-era or out-of-scope titles. "
         "These are suggestions, not proof: the application validates them. Never invent song titles.\n"
         "- A mood-only follow-up MUST preserve selection in BOTH directions: any stays any, hits stays hits. "
         "'more hype/aggressive' after 'Music to game to' changes mood, NOT any to hits. Only an explicit "
         "request for hits/bangers/classics or a free/full catalog changes selection. For discovery/any "
         "keep songs=[]; use artist_hints solely for identifying artists.\n"
+        "- 'all songs from these artists', 'alle Songs dieser Künstler' or 'the full catalog' means "
+        "discovery/any using those artists' Spotify catalogs, not another finite model-generated hits list. "
+        "Keep repeat policy separate: more songs does not automatically permit repeats, and permitting "
+        "repeats does not automatically change a hits pool to all songs.\n"
         "- A discovery/hits refinement MUST include concrete song suggestions too. For a mood change "
         "such as 'Mehr davon, aber mehr aggressiv/hype', recommend hits matching the NEW mood, keeping "
         "the active period/style and artist restrictions. The no-additional-songs rule applies only to "
@@ -91,8 +127,9 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
         "for no-repeat wishes; the application checks its full bounded session history, so do not invent "
         "a list of previously heard songs. When excluding a song, include its unambiguous artist and title; "
         "use last_confirmed_song for 'not this song again'.\n"
-        "- For a follow-up 'more like this' after a finite song list, use discovery rather than replaying "
-        "the explicit list. A new concrete song/list remains finite unless continuation is explicitly asked."
+        "- For a follow-up 'more like this' after a song list, use discovery. A concrete song/list otherwise "
+        "repeats ONLY its requested songs in order by default. No-repeat or 'only once' wishes finish after "
+        "one pass. Explicit 'then similar music' plays the list once and then continues matching music."
     )
     user_prompt = f"Interpret this request: {user_request}"
     if session_context:
@@ -110,28 +147,12 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
     data = _request_model(payload, api_key)
     plan = check_request_kind(parse_music_request(data, allow_empty_hit_refinement=True), user_request, session_context)
     plan = check_explicit_period(plan, user_request)
-    previous_data = (session_context or {}).get('active_request')
-    previous = parse_music_request(json.loads(json.dumps(previous_data))) if previous_data else None
     plan = preserve_refinement_selection(plan, previous, user_request)
+    if repeat_policy is not None:
+        plan = replace(plan, repeat_policy=repeat_policy, avoid_session_repeats=repeat_policy == 'session')
     if plan.kind == 'discovery' and plan.selection == 'hits' and not plan.songs:
         if previous is None:
             raise RequestValidationError('Für die Hit-Folgeanfrage fehlt eine bestehende Auswahl. Bitte zuerst einen Musikwunsch nennen.')
-        same_choice = (previous.kind == 'discovery' and previous.selection == 'hits'
-                       and (not plan.mood or plan.mood.casefold() == previous.mood.casefold())
-                       and (not plan.style or plan.style.casefold() == previous.style.casefold())
-                       and (plan.year_start is None or (plan.year_start, plan.year_end) == (previous.year_start, previous.year_end))
-                       and {artist_key(n) for n in plan.artists} <= {artist_key(n) for n in previous.artists})
-        no_repeat_only = re.fullmatch(
-            r'(?:heute\s+)?(?:bitte\s+)?keine\s+wiederholungen(?:\s+von\s+vorhin)?[.!?]*'
-            r'|(?:today\s+)?(?:please\s+)?no\s+repeats(?:\s+from\s+earlier)?(?:\s+please)?[.!?]*',
-            user_request.strip(), flags=re.I)
-        if same_choice and no_repeat_only:
-            allowed = {artist_key(n) for n in plan.artists}
-            songs = tuple(s for s in previous.songs if artist_key(s.artist) in allowed)
-            if not songs:
-                raise RequestValidationError('Nach der Filteranpassung fehlen passende Hit-Vorschläge.')
-            print('  AI: Bestehende Hit-Vorschläge für die Filteranpassung übernommen.')
-            return replace(plan, songs=songs)
         # One bounded repair only. Never pretend the old songs match a new mood.
         values = dict(mood=plan.mood or previous.mood, style=plan.style or previous.style)
         if plan.year_start is None:
@@ -140,7 +161,7 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
         print('  AI: Ergänze fehlende Hit-Vorschläge für die angepasste Auswahl (ein Versuch).')
         repair = dict(model='claude-sonnet-4-6', max_tokens=4000,
                       system='Return ONLY a JSON object {"songs":[{"artist":string,"title":string}],"mood":string}. '
-                             'Recommend 16-32 recognizable hits matching the given years, style and NEW mood. '
+                             'Recommend 32-40 recognizable hits matching the given years, style and NEW mood. '
                              'The current user request overrides the previous mood; set mood to the resulting '
                              'concise mood description (at most 160 characters). Use only artists in the supplied '
                              'selection artists list. No Spotify IDs, URLs, invented titles or other fields. '

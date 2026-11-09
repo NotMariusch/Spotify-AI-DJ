@@ -216,7 +216,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
         self.tracker = PlaybackTracker()
         values = dict(tracker=self.tracker, now_playing=self.tracker.track,
-                      ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_resolutions={},
+                      ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_cycle=(), ai_song_resolutions={},
                       ai_pool=[('Artist', 'artist')], ai_artists={'Artist': 'artist'},
                       ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None, ai_session=dj.AISession(),
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
@@ -274,7 +274,8 @@ class StructuredPlaybackTests(unittest.TestCase):
         self.fetch.assert_not_called()
 
     def test_explicit_list_order_overrides_recent_history_and_stops_after_last(self):
-        dj.ai_request_plan = request(kind='songs', songs=[dict(artist='Artist', title='Two'), dict(artist='Artist', title='One')])
+        dj.ai_request_plan = request(kind='songs', repeat_policy='session', avoid_session_repeats=True,
+                                    songs=[dict(artist='Artist', title='Two'), dict(artist='Artist', title='One')])
         dj.artist_cache['Artist'] = [song('One'), song('Two')]
         dj.recent_titles.append('two')
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
@@ -324,7 +325,8 @@ class StructuredPlaybackTests(unittest.TestCase):
         self.start.assert_not_called()
 
     def test_exhausted_hits_pool_prepares_pause_not_album_fallback(self):
-        dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
+        dj.ai_request_plan = request(selection='hits', repeat_policy='session', avoid_session_repeats=True,
+                                    songs=[dict(artist='Artist', title='Hit')])
         dj.artist_cache['Artist'] = [song()]
         dj.play_artist('Artist', 'ai', no_judge=True)
         self.prepare()

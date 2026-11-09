@@ -202,7 +202,10 @@ while True:
                                             cwd=folder, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                             creationflags=subprocess.CREATE_NO_WINDOW)
                     try:
-                        deadline = time.monotonic() + 10
+                        # Cold Windows/Python startup can exceed ten seconds
+                        # under host load. This is fixture readiness, not the
+                        # production shutdown timeout under test.
+                        deadline = time.monotonic() + 30
                         def pids_ready():
                             try:
                                 return all((base / name).read_text().isdigit() for name in ('dj.pid', 'grandchild.pid'))

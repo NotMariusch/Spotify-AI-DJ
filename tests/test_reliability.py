@@ -127,6 +127,7 @@ class IntegrationTests(unittest.TestCase):
         dj.ai_request_plan = None
         dj.ai_request_tracks_ready = False
         dj.ai_song_queue = []
+        dj.ai_song_cycle = ()
         dj.ai_song_resolutions = {}
         self.stack.enter_context(patch.object(dj, 'ai_session', dj.AISession()))
         dj.artist_cache = {}
@@ -170,6 +171,19 @@ class IntegrationTests(unittest.TestCase):
     def test_wrong_device_is_not_confirmation(self):
         dj.sp.current_playback.return_value = playback(device='phone')
         self.assertFalse(dj.start_selected('Artist', 'jpop', track(), False))
+
+    def test_repeat_start_waits_for_reset_instead_of_confirming_old_near_end_sample(self):
+        dj.sp.current_playback.side_effect = [playback(progress=198000), playback(progress=0)]
+        self.assertTrue(dj.start_selected('Artist', 'ai', track(), True))
+        self.assertEqual(dj.sp.current_playback.call_count, 2)
+        self.assertEqual(dj.now_playing['progress_ms'], 0)
+
+    def test_same_song_without_confirmed_restart_does_not_count_as_new_ai_play(self):
+        dj.sp.current_playback.return_value = playback(progress=198000)
+        self.assertFalse(dj.start_selected('Artist', 'ai', track(), True))
+        self.assertEqual(dj.sp.current_playback.call_count, 4)
+        self.assertEqual(dj.ai_artist_plays, {})
+        dj.save_memory.assert_not_called()
 
     def test_no_arbitrary_device_fallback(self):
         dj.sp.devices.return_value = {'devices': [dict(id='phone', name='iPhone', is_active=False)]}

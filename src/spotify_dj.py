@@ -16,7 +16,7 @@ from instance_lock import InstanceLock
 from json_store import write_json_atomic
 from ai_request import ask_claude, resolve_artists_to_ids, ModelRateLimitError
 from ai_session import AISession, is_session_reset
-from music_request import RequestValidationError, constrain_tracks, resolve_song_wishes, release_year
+from music_request import RequestValidationError, constrain_tracks, resolve_song_wishes, release_year, artist_key, song_key
 
 # =====================
 # SPOTIFY CONFIG
@@ -60,6 +60,7 @@ ai_last_artist = None
 ai_request_plan = None
 ai_request_tracks_ready = False
 ai_song_queue = []  # Explicit wishes only; consume after confirmed playback.
+ai_song_cycle = ()  # Validated ordered requests; repeats never add other songs.
 ai_song_resolutions = {}  # Resume bounded lookups after a cooldown; request-local only.
 ai_session = AISession()  # Conversation, exclusions and listening history; never saved.
 
@@ -836,6 +837,7 @@ def safe_play(_device_id=None, **kwargs):
     # Automatic transitions already have a just-confirmed owned device.
     device_id = _device_id if _device_id is not None else get_active_device_id()
     expected_uri = kwargs["offset"]["uri"]
+    requested_position = kwargs.get('position_ms', 0)
     status("Start angefordert; warte auf Spotify-Bestätigung")
     print("IS_PLAYING:false")
     publish_progress(None)
@@ -848,9 +850,12 @@ def safe_play(_device_id=None, **kwargs):
             raise
         except Exception:
             continue
+        position = (pb or {}).get('progress_ms')
         if (pb and pb.get("is_playing") and (pb.get("item") or {}).get("uri") == expected_uri
                 and (pb.get("device") or {}).get("id") == device_id
-                and (pb.get("context") or {}).get("uri") == kwargs["context_uri"]):
+                and (pb.get("context") or {}).get("uri") == kwargs["context_uri"]
+                and isinstance(position, (int, float)) and math.isfinite(position)
+                and requested_position <= position <= requested_position + 10000):
             return pb
     status("Start nicht bestätigt; neuer DJ-Befehl erforderlich")
     return None
@@ -1042,13 +1047,15 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
     if not pb:
         tracker.control = False
         return False
-    ai_session.record_play(name, chosen)
+    ai_session.record_play(name, chosen, count_start=True)
     tracker.start(name, mode, chosen, pb, time.monotonic(), ai=no_judge,
                   trial=name in discovered_artists and not discovered_artists[name].get("graduated", False))
     if no_judge:
         ai_recent_titles.append(normalize_title(chosen["name"]))
         ai_artist_plays[name] = ai_artist_plays.get(name, 0) + 1
         ai_last_artist = name
+        if not ai_song_queue and song_cycle_repeats() and ai_song_cycle[0][1]['uri'] == chosen['uri']:
+            ai_song_queue.extend(ai_song_cycle)
         if ai_song_queue and ai_song_queue[0][1]["uri"] == chosen["uri"]:
             ai_song_queue.pop(0)
     else:
@@ -1070,6 +1077,43 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
         # Discovery must not delay the outgoing song's critical end window.
         run_pending_discoveries()
     return True
+
+
+def ai_repeat_policy():
+    if ai_request_plan is not None:
+        if ai_request_plan.repeat_policy != 'inherit':
+            return ai_request_plan.repeat_policy
+        if ai_request_plan.avoid_session_repeats:
+            return 'session'
+    return ai_session.repeat_policy
+
+
+def track_available(name, track, ai, explicit=False):
+    if track.get('id') in banned_track_ids or name in banned_artist_names:
+        return False
+    if ai:
+        if not ai_session.allows(ai_request_plan, name, track, explicit=explicit):
+            return False
+        if explicit or ai_repeat_policy() == 'allow':
+            return True
+    return (normalize_title(track['name']) not in recent_titles
+            and normalize_title(track['name']) not in ai_recent_titles)
+
+
+def available_tracks(name, tracks, ai):
+    available = [t for t in tracks if track_available(name, t, ai)]
+    if ai and available and (ai_repeat_policy() == 'allow' or (ai_request_plan and ai_request_plan.less_songs)):
+        ranks = [(ai_session.song_preference_rank(ai_request_plan, name, t), t) for t in available]
+        best = min(rank for rank, _ in ranks)
+        available = [t for rank, t in ranks if rank == best]
+    if ai and ai_repeat_policy() == 'allow':
+        last = ai_session.last_song
+        if last:
+            last_key = (artist_key(last['artist']), song_key(last['title']))
+            different = [t for t in available if last_key not in ai_session.track_keys(name, t)]
+            # Prefer a different song, but a one-song pool can repeat deliberately.
+            return different or available
+    return available
 
 
 def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, banned=False, no_judge=False):
@@ -1097,8 +1141,9 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
     if no_judge and not ensure_ai_catalogs():
         return False
     if no_judge and explicit_songs_pending():
-        if ai_song_queue:
-            name, chosen = ai_song_queue[0]
+        wish = next_song_wish()
+        if wish:
+            name, chosen = wish
             if chosen.get("id") in banned_track_ids or name in banned_artist_names:
                 status("Der nächste Songwunsch ist gesperrt; Anfrage bitte anpassen")
                 return False
@@ -1125,12 +1170,9 @@ def play_artist(name, mode, pool=None, interrupted=True, mode_switch=False, bann
             tracks = ai_session_catalogs[candidate] if no_judge else get_artist_tracks(candidate)
             filtered = ai_track_versions(tracks) if no_judge else select_best_tracks(tracks)
             print(f"  {candidate}: fetched={len(tracks)}, eligible={len(filtered)}")
-            available = [t for t in filtered if t.get("id") not in banned_track_ids
-                         and normalize_title(t["name"]) not in recent_titles
-                         and normalize_title(t["name"]) not in ai_recent_titles
-                         and (not no_judge or ai_session.allows(ai_request_plan, candidate, t))]
+            available = available_tracks(candidate, filtered, no_judge)
             if not available:
-                print(f"  {candidate}: keine passenden, nicht kürzlich gehörten Tracks.")
+                print(f"  {candidate}: keine passenden Tracks unter den aktiven Filtern und Wiederholungsregeln.")
                 continue
             chosen = random.choice(available)
             try:
@@ -1233,8 +1275,13 @@ def ai_artist_order(pool, preferred=None):
     """Random ties, less-played artists first, current artist as last fallback."""
     names = list(dict.fromkeys(n for n in pool if n not in banned_artist_names))
     random.shuffle(names)
-    names.sort(key=lambda n: (n == ai_last_artist, ai_artist_plays.get(n, 0),
-                              n != preferred if preferred is not None else False))
+    if any(ai_session.artist_reduced(ai_request_plan, n) for n in names):
+        names.sort(key=lambda n: (ai_artist_plays.get(n, 0) * 4 + 3
+                                 if ai_session.artist_reduced(ai_request_plan, n) else ai_artist_plays.get(n, 0),
+                                 n == ai_last_artist))
+    else:
+        names.sort(key=lambda n: (n == ai_last_artist, ai_artist_plays.get(n, 0),
+                                  n != preferred if preferred is not None else False))
     return names
 
 
@@ -1274,8 +1321,19 @@ def explicit_songs_pending():
             and (bool(ai_song_queue) or not ai_request_plan.continue_similar))
 
 
+def song_cycle_repeats():
+    return bool(auto_mode == 'ai' and ai_request_plan is not None and ai_request_plan.kind == 'songs'
+                and not ai_request_plan.continue_similar and ai_repeat_policy() == 'allow' and ai_song_cycle)
+
+
+def next_song_wish():
+    if ai_song_queue:
+        return ai_song_queue[0]
+    return ai_song_cycle[0] if song_cycle_repeats() else None
+
+
 def ensure_structured_request():
-    global ai_request_tracks_ready
+    global ai_request_tracks_ready, ai_song_cycle
     if ai_request_tracks_ready:
         return True
     plan = ai_request_plan
@@ -1310,6 +1368,7 @@ def ensure_structured_request():
                 return False
             if plan.kind == "songs":
                 ai_song_queue.extend(found)
+                ai_song_cycle = tuple(found)
             elif plan.selection == "hits":
                 catalogs = {name: [] for name, _ in ai_pool}
                 for name, chosen in found:
@@ -1372,8 +1431,9 @@ def prepare_next_track():
     if not pool or mode != t["mode"] or ai != t["is_ai_play"]:
         return
     if ai and explicit_songs_pending():
-        if ai_song_queue:
-            name, chosen = ai_song_queue[0]
+        wish = next_song_wish()
+        if wish:
+            name, chosen = wish
             _prepared_next = dict(owner=t["generation"], request=request, selection=(name, "ai", chosen, True), explicit=True)
         else:
             _prepared_next = dict(owner=t["generation"], request=request, stop=True)
@@ -1394,11 +1454,7 @@ def prepare_next_track():
             tracks = (entry.get("tracks", []) if
                       (time.time() - entry.get("fetched_at", 0)) / 86400 < CACHE_TTL_DAYS else [])
         versions = ai_track_versions(tracks) if ai else select_best_tracks(tracks)
-        available = [t for t in versions
-                     if t.get("id") not in banned_track_ids
-                     and normalize_title(t["name"]) not in recent_titles
-                     and normalize_title(t["name"]) not in ai_recent_titles
-                     and (not ai or ai_session.allows(ai_request_plan, name, t))]
+        available = available_tracks(name, versions, ai)
         if available:
             _prepared_next = dict(owner=now_playing["generation"], request=request,
                                   selection=(name, mode, random.choice(available), ai))
@@ -1421,10 +1477,7 @@ def advance_to_next_track():
         _prepared_next = None
         tracker.control = False
         chosen = selection[2]
-        if (chosen.get("id") in banned_track_ids or selection[0] in banned_artist_names
-                or (selection[3] and not ai_session.allows(ai_request_plan, selection[0], chosen, explicit=explicit))
-                or (not explicit and (normalize_title(chosen["name"]) in recent_titles
-                                      or normalize_title(chosen["name"]) in ai_recent_titles))):
+        if not track_available(selection[0], chosen, selection[3], explicit=explicit):
             status("Vorbereiteter Titel nicht mehr gültig; neuer DJ-Befehl erforderlich")
             return
         try:
@@ -1436,7 +1489,7 @@ def advance_to_next_track():
             publish_playback(None)
         return  # A failed start must never trigger a second fallback start.
     _prepared_next = None
-    if explicit_songs_pending() and not ai_song_queue:
+    if explicit_songs_pending() and not next_song_wish():
         finish_song_request(now_playing["device_id"])
         return
     if ai_pool:
@@ -1513,7 +1566,7 @@ def track_finished(allow_early=False):
 
 def run_dj():
     global current_pool, auto_mode, _pending_selection, _prepared_next, ai_last_artist
-    global ai_request_plan, ai_request_tracks_ready
+    global ai_request_plan, ai_request_tracks_ready, ai_song_cycle
 
     while True:
         if os.path.exists(INPUT_FILE):
@@ -1600,6 +1653,7 @@ def run_dj():
                 ai_request_plan = None
                 ai_request_tracks_ready = False
                 ai_song_queue.clear()
+                ai_song_cycle = ()
                 ai_song_resolutions.clear()
                 user_request = choice[3:].strip()
                 if is_session_reset(user_request):
@@ -1619,7 +1673,11 @@ def run_dj():
                         print("  AI interpretation: " + ai_request_plan.summary())
                         print("  AI session: " + ("Folgeanfrage" if ai_request_plan.context_action == 'refine' else "Neue Musikauswahl")
                               + f"; {len(ai_request_plan.excluded_artists)} Künstler-/{len(ai_request_plan.excluded_songs)} Song-Ausschlüsse"
-                              + ("; keine Session-Wiederholungen" if ai_request_plan.avoid_session_repeats else ""))
+                              + {'session': '; keine Session-Wiederholungen',
+                                 'allow': '; Wiederholungen erlaubt; AI-Pool läuft weiter',
+                                 'recent': '; kürzlich gespielte Songs vermeiden'}[ai_request_plan.repeat_policy])
+                        if ai_request_plan.less_artists or ai_request_plan.less_songs:
+                            print(f"  AI session: Seltener spielen: {len(ai_request_plan.less_artists)} Künstler / {len(ai_request_plan.less_songs)} Songs (nur diese Session)")
                         print(f"  AI suggested: {artist_names}")
 
                         # Build artist dict for ID resolution only

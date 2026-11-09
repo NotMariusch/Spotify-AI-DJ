@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from ai_session import AISession, is_session_reset
-from music_request import RequestValidationError, parse_music_request, preserve_refinement_selection
+from music_request import RequestValidationError, parse_music_request, preserve_refinement_selection, repeat_policy_from_text
 import ai_request
 import spotify_dj as dj
 from playback_state import PlaybackTracker
@@ -33,6 +33,50 @@ class SessionTests(unittest.TestCase):
                                                        year_end=None, style='', mood='less aggressive'))
         self.assertEqual((plan.year_start, plan.year_end, plan.style), (2000, 2009, 'pop'))
         self.assertEqual(plan.mood, 'less aggressive')
+
+    def test_ai_defaults_to_continuous_play_and_unasked_model_block_is_ignored(self):
+        self.assertEqual(self.session.repeat_policy, 'allow')
+        plan = self.session.reconcile(fixtures.request(repeat_policy='session', avoid_session_repeats=True),
+                                      'Music to game to')
+        self.assertEqual(plan.repeat_policy, 'allow')
+        self.assertFalse(plan.avoid_session_repeats)
+        strict = self.session.reconcile(fixtures.request(repeat_policy='session', avoid_session_repeats=True),
+                                        'play no song twice')
+        self.assertTrue(strict.avoid_session_repeats)
+        self.session.clear()
+        self.assertEqual(self.session.repeat_policy, 'allow')
+
+    def test_less_of_earlier_music_is_soft_and_does_not_enable_no_repeat_rule(self):
+        self.session.record_play('Artist', fixtures.song(), count_start=True)
+        plan = self.session.reconcile(fixtures.request(repeat_policy='session', avoid_session_repeats=True,
+                                                       less_artists=['Artist']), 'weniger von dem wie vorhin')
+        self.assertEqual(plan.repeat_policy, 'allow')
+        self.assertFalse(plan.avoid_session_repeats)
+        self.assertTrue(self.session.allows(plan, 'Artist', fixtures.song()))
+        self.assertTrue(self.session.artist_reduced(plan, 'Artist'))
+        self.session.accept(plan, 'weniger davon')
+        inherited = self.session.reconcile(fixtures.request(), 'more songs')
+        self.assertEqual(inherited.less_artists, ('Artist',))
+        cleared = self.session.reconcile(fixtures.request(less_artists=[]), 'wieder mehr von Artist')
+        self.assertEqual(cleared.less_artists, ())
+
+    def test_recent_music_context_is_bounded_and_counts_only_confirmed_starts(self):
+        for i in range(20):
+            self.session.record_play('Artist', fixtures.song(str(i)), count_start=True)
+        last = fixtures.song('19')
+        before = dict(self.session.track_plays)
+        self.session.record_play('Artist', last)
+        self.assertEqual(dict(self.session.track_plays), before)
+        context = self.session.context()
+        self.assertEqual(len(context['recent_music']), 12)
+        self.assertEqual(context['recent_music'][-1], dict(artist='Artist', title='19'))
+        self.assertNotIn('spotify:', json.dumps(context))
+
+    def test_soft_preferences_reject_unchecked_ids_and_invalid_types(self):
+        for values in (dict(less_artists='Artist'), dict(less_songs='Hit'),
+                       dict(less_songs=[dict(artist='Artist', title='Hit', uri='invented')])):
+            with self.subTest(values=values), self.assertRaises(RequestValidationError):
+                fixtures.request(**values)
 
     def test_fixed_artist_pool_cannot_silently_expand(self):
         self.accept(fixtures.request(artists=['Ado', 'Eve']))
@@ -142,6 +186,47 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(self.session.allows(plan, 'Artist', other_album, explicit=True))
         self.assertTrue(self.session.reconcile(fixtures.request()).avoid_session_repeats)
 
+    def test_explicit_repeat_permission_can_release_strict_rule_without_losing_exclusions(self):
+        self.accept(fixtures.request(avoid_session_repeats=True, excluded_artists=['Other']))
+        self.session.record_play('Artist', fixtures.song())
+        plan = self.session.reconcile(fixtures.request(avoid_session_repeats=True),
+                                      'i dont care about repeats, give me many songs')
+        self.assertEqual(plan.repeat_policy, 'allow')
+        self.assertFalse(plan.avoid_session_repeats)
+        self.assertEqual(plan.excluded_artists, ('Other',))
+        self.assertTrue(self.session.allows(plan, 'Artist', fixtures.song()))
+        self.assertTrue(self.session.heard)
+        self.session.accept(plan, 'allow repeats')
+        self.assertEqual(self.session.reconcile(fixtures.request()).repeat_policy, 'allow')
+
+    def test_no_repeat_rule_can_be_enabled_again_and_uses_preserved_history(self):
+        self.accept(fixtures.request(repeat_policy='allow'))
+        self.session.record_play('Artist', fixtures.song())
+        plan = self.session.reconcile(fixtures.request(repeat_policy='allow'), 'Heute keine Wiederholungen von vorhin')
+        self.assertEqual(plan.repeat_policy, 'session')
+        self.assertTrue(plan.avoid_session_repeats)
+        self.assertFalse(self.session.allows(plan, 'Artist', fixtures.song()))
+
+    def test_repeat_commands_distinguish_permission_negation_and_unrelated_followups(self):
+        for text in ("i don't care about repeats", 'i dont care about repeats', 'repeats are okay',
+                     'Wiederholungen wieder erlauben', 'dieselben Songs nochmal', 'same songs again'):
+            self.assertEqual(repeat_policy_from_text(text), 'allow', text)
+        for text in ('no repeats', "don't allow repeats", 'keine Wiederholungen erlauben', 'nur einmal', 'only once'):
+            self.assertEqual(repeat_policy_from_text(text), 'session', text)
+        self.assertIsNone(repeat_policy_from_text('more songs from the same artists'))
+        with self.assertRaises(RequestValidationError):
+            fixtures.request(repeat_policy='whatever')
+
+    def test_all_songs_request_uses_catalog_for_new_and_refined_requests(self):
+        previous = fixtures.request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
+        for action in ('new', 'refine'):
+            plan = fixtures.request(context_action=action, selection='hits', songs=[dict(artist='Artist', title='Hit')])
+            for text in ('just give me all songs from these artists', 'alle Songs dieser Künstler'):
+                fixed = preserve_refinement_selection(plan, previous, text)
+                self.assertEqual(fixed.selection, 'any')
+                self.assertEqual(fixed.songs, ())
+                self.assertEqual(fixed.artists, previous.artists)
+
     def test_same_title_by_different_artist_is_not_a_repeat(self):
         self.session.record_play('Artist', fixtures.song())
         other = fixtures.song(artist='other')
@@ -235,7 +320,7 @@ class IncompleteRefinementTests(unittest.TestCase):
         self.assertEqual(plan.songs, ())
         self.http.assert_called_once()
 
-    def test_filter_only_update_reuses_existing_hints_without_second_model_call(self):
+    def test_filter_only_update_reuses_existing_hints_without_model_call(self):
         data = asdict(self.previous)
         data.update(context_action='refine', songs=[], avoid_session_repeats=True)
         self.http.return_value = model_response(data)
@@ -244,7 +329,19 @@ class IncompleteRefinementTests(unittest.TestCase):
         self.assertEqual(plan.mood, self.previous.mood)
         self.assertEqual((plan.year_start, plan.year_end), (2000, 2009))
         self.assertTrue(plan.avoid_session_repeats)
-        self.http.assert_called_once()
+        self.http.assert_not_called()
+
+    def test_repeat_only_update_keeps_existing_hit_selection_without_repair_request(self):
+        self.session.accept(fixtures.request(selection='hits', avoid_session_repeats=True,
+            songs=[dict(artist='Artist', title='Hit')]), 'no repeats')
+        data = asdict(self.previous)
+        data.update(context_action='refine', songs=[], avoid_session_repeats=True)
+        self.http.return_value = model_response(data)
+        plan = self.session.reconcile(ai_request.ask_claude('allow repeats', self.session.context()), 'allow repeats')
+        self.assertEqual(plan.songs, self.previous.songs)
+        self.assertEqual(plan.repeat_policy, 'allow')
+        self.assertFalse(plan.avoid_session_repeats)
+        self.http.assert_not_called()
 
     def test_hype_update_repairs_missing_hints_once_and_keeps_years_and_artists(self):
         data = asdict(self.previous)
@@ -314,7 +411,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
         tracker = PlaybackTracker()
         values = dict(ai_session=AISession(), tracker=tracker, now_playing=tracker.track,
-                      ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_resolutions={},
+                      ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_cycle=(), ai_song_resolutions={},
                       ai_pool=[('Artist', 'artist')], ai_artists={'Artist': 'artist'},
                       ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None,
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
@@ -364,17 +461,17 @@ class PlaybackSessionTests(unittest.TestCase):
         first = fixtures.request(selection='hits', artist_scope='suggested', songs=[dict(artist='Artist', title='Hit')])
         hype = asdict(first)
         hype.update(context_action='refine', mood='aggressive, hype', songs=[])
-        filters = dict(hype, avoid_session_repeats=True)
+
         repair = dict(songs=[dict(artist='Artist', title='HypeOne'), dict(artist='Artist', title='HypeTwo')], mood='aggressive, hype')
         dj.artist_cache['Artist'] = [fixtures.song(), fixtures.song('HypeOne'), fixtures.song('HypeTwo')]
         before = copy.deepcopy(dj.memory)
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
                 patch.object(ai_request.urllib.request, 'urlopen', side_effect=[
-                    model_response(asdict(first)), model_response(hype), model_response(repair), model_response(filters)]) as http, \
+                    model_response(asdict(first)), model_response(hype), model_response(repair)]) as http, \
                 patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
             self.commands(['ai:2000s pop from my childhood please', 'ai:Mehr davon, aber mehr aggressiv/hype',
                            'ai:Heute keine Wiederholungen von vorhin'])
-        self.assertEqual(http.call_count, 4)
+        self.assertEqual(http.call_count, 3)
         self.assertEqual(self.start.call_count, 3)
         self.assertEqual(dj.ai_request_plan.mood, 'aggressive, hype')
         self.assertTrue(dj.ai_request_plan.avoid_session_repeats)
@@ -421,6 +518,150 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertFalse(dj.play_artist('Artist', 'ai', no_judge=True))
         self.assertFalse(dj.ai_session.heard)
         self.assertIsNone(dj.ai_session.last_song)
+
+    def test_default_hits_pool_runs_multiple_rounds_without_learning_or_extra_requests(self):
+        dj.ai_request_plan = fixtures.request(selection='hits',
+            songs=[dict(artist='Artist', title='First'), dict(artist='Artist', title='Second')])
+        dj.artist_cache['Artist'] = [fixtures.song('First'), fixtures.song('Second')]
+        dj.recent_titles.extend(['first', 'second'])
+        dj.ai_recent_titles.extend(['first', 'second'])
+        dj.ai_session.record_play('Artist', fixtures.song('First'))
+        before = copy.deepcopy(dj.memory)
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        played = [dj.now_playing['uri']]
+        for _ in range(5):
+            dj.now_playing.update(progress_ms=185000, listened_ms=185000, preparation_attempted=False)
+            dj.prepare_next_track()
+            self.assertFalse(dj._prepared_next.get('stop'))
+            dj.now_playing['confirmed'] = False
+            dj.advance_to_next_track()
+            played.append(dj.now_playing['uri'])
+        self.assertEqual(len(set(played)), 2)
+        self.assertTrue(all(a != b for a, b in zip(played, played[1:])))
+        self.assertEqual(self.start.call_count, 6)
+        self.sp.search.assert_not_called()
+        self.fetch.assert_not_called()
+        self.sp.pause_playback.assert_not_called()
+        self.assertEqual(dj.memory, before)
+        dj.save_memory.assert_not_called()
+        dj.save_recent.assert_not_called()
+
+    def test_default_explicit_song_list_loops_in_order_without_adding_music(self):
+        dj.ai_request_plan = fixtures.request(kind='songs', songs=[dict(artist='Artist', title='First'),
+                                                                 dict(artist='Artist', title='Second')])
+        dj.artist_cache['Artist'] = [fixtures.song('First'), fixtures.song('Second'), fixtures.song('Unrequested')]
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        played = [dj.now_playing['uri']]
+        for _ in range(5):
+            dj.now_playing.update(progress_ms=185000, listened_ms=185000, preparation_attempted=False)
+            dj.prepare_next_track()
+            self.assertFalse(dj._prepared_next.get('stop'))
+            dj.now_playing['confirmed'] = False
+            dj.advance_to_next_track()
+            played.append(dj.now_playing['uri'])
+        self.assertEqual(played, [fixtures.song('First')['uri'], fixtures.song('Second')['uri']] * 3)
+        self.sp.search.assert_not_called()
+        self.fetch.assert_not_called()
+        dj.save_memory.assert_not_called()
+        dj.save_recent.assert_not_called()
+
+    def test_less_artist_is_rarer_but_remains_playable_without_learning(self):
+        other = fixtures.song('OtherHit', artist='other')
+        other['artists'][0]['name'] = 'Other'
+        dj.ai_pool = [('Artist', 'artist'), ('Other', 'other')]
+        dj.ai_artists['Other'] = 'other'
+        dj.ai_request_plan = fixtures.request(artists=['Artist', 'Other'], less_artists=['Other'])
+        self.fetch.side_effect = lambda name: [fixtures.song()] if name == 'Artist' else [other]
+        before = copy.deepcopy(dj.memory)
+        played = []
+        for _ in range(16):
+            self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True, interrupted=False))
+            played.append(dj.now_playing['artist'])
+        self.assertGreater(played.count('Other'), 0)
+        self.assertLess(played.count('Other'), played.count('Artist'))
+        self.assertEqual(dj.memory, before)
+        dj.save_memory.assert_not_called()
+
+    def test_less_song_is_rarer_and_can_be_restored_without_being_banned(self):
+        dj.ai_request_plan = fixtures.request(less_songs=[dict(artist='Artist', title='Reduced')])
+        self.fetch.return_value = [fixtures.song('Normal'), fixtures.song('Reduced')]
+        played = []
+        for _ in range(16):
+            self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True, interrupted=False))
+            played.append(dj.now_playing['uri'])
+        reduced = fixtures.song('Reduced')['uri']
+        self.assertGreater(played.count(reduced), 0)
+        self.assertLess(played.count(reduced), played.count(fixtures.song('Normal')['uri']))
+        self.assertNotIn(fixtures.song('Reduced')['id'], dj.banned_track_ids)
+        dj.save_memory.assert_not_called()
+        dj.save_banned.assert_not_called()
+
+    def test_failed_new_cycle_does_not_consume_song_or_count_a_play(self):
+        dj.ai_request_plan = fixtures.request(kind='songs', songs=[dict(artist='Artist', title='Hit')])
+        dj.artist_cache['Artist'] = [fixtures.song()]
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        before = dict(dj.ai_session.track_plays)
+        dj.now_playing.update(progress_ms=185000, listened_ms=185000, preparation_attempted=False)
+        dj.prepare_next_track()
+        self.start.side_effect = None
+        self.start.return_value = None
+        dj.now_playing['confirmed'] = False
+        dj.advance_to_next_track()
+        self.assertEqual(dj.ai_song_queue, [])
+        self.assertEqual(dict(dj.ai_session.track_plays), before)
+        self.assertEqual(dj.next_song_wish()[1]['uri'], fixtures.song()['uri'])
+
+    def test_one_song_repeat_pool_can_repeat_but_still_respects_bans(self):
+        dj.ai_request_plan = fixtures.request(repeat_policy='allow')
+        song = fixtures.song()
+        dj.ai_session.record_play('Artist', song)
+        dj.recent_titles.append('hit')
+        self.assertEqual(dj.available_tracks('Artist', [song], True), [song])
+        dj.banned_track_ids.add(song['id'])
+        self.assertEqual(dj.available_tracks('Artist', [song], True), [])
+        dj.banned_track_ids.clear()
+        dj.ai_request_plan = fixtures.request(repeat_policy='allow', excluded_songs=[dict(artist='Artist', title='Hit')])
+        self.assertEqual(dj.available_tracks('Artist', [song], True), [])
+
+    def test_normal_mode_keeps_recent_filter_even_when_ai_allows_repeats(self):
+        dj.ai_request_plan = fixtures.request(repeat_policy='allow')
+        dj.recent_titles.append('hit')
+        self.assertFalse(dj.track_available('Artist', fixtures.song(), False))
+        self.assertTrue(dj.track_available('Artist', fixtures.song(), True))
+
+    def test_explicit_song_loop_never_adds_other_music(self):
+        dj.ai_request_plan = fixtures.request(kind='songs', repeat_policy='allow',
+                                              songs=[dict(artist='Artist', title='Hit')])
+        dj.artist_cache['Artist'] = [fixtures.song()]
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        dj.now_playing.update(progress_ms=185000, listened_ms=185000, preparation_attempted=False)
+        dj.prepare_next_track()
+        self.assertFalse(dj._prepared_next.get('stop'))
+        self.assertEqual(dj._prepared_next['selection'][2]['uri'], fixtures.song()['uri'])
+
+    def test_log_request_can_release_repeats_and_expand_to_catalog_without_learning(self):
+        first = fixtures.request(selection='hits', avoid_session_repeats=True,
+                                 songs=[dict(artist='Artist', title='Hit')], excluded_artists=['Other'])
+        dj.ai_session.accept(first, 'no repeats')
+        dj.ai_session.record_play('Artist', fixtures.song())
+        # Simulate the exact failure in the log: model retains hits and strict flag.
+        mistaken = asdict(first)
+        mistaken.update(context_action='refine')
+        self.fetch.return_value = [fixtures.song(), fixtures.song('DeepCut')]
+        before = copy.deepcopy(dj.memory)
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
+                patch.object(ai_request.urllib.request, 'urlopen', return_value=model_response(mistaken)) as http, \
+                patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
+            self.commands(['ai:i dont care about repeats, give me all songs from these artists'])
+        self.assertEqual(dj.ai_request_plan.selection, 'any')
+        self.assertEqual(dj.ai_request_plan.repeat_policy, 'allow')
+        self.assertFalse(dj.ai_request_plan.avoid_session_repeats)
+        self.assertEqual(dj.ai_request_plan.excluded_artists, ('Other',))
+        self.assertEqual(len(dj.ai_session_catalogs['Artist']), 2)
+        self.assertEqual(self.start.call_count, 1)
+        http.assert_called_once()
+        self.assertEqual(dj.memory, before)
+        dj.save_memory.assert_not_called()
 
     def test_no_repeat_filter_applies_to_start_and_prepared_transition(self):
         dj.ai_request_plan = fixtures.request(avoid_session_repeats=True)
