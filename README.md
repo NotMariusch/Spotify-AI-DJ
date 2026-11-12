@@ -196,6 +196,62 @@ You: 3        ← switches to K-Pop mode
 
 ## AI Voice Mode
 
+### Referenzsongs und musikalische Eigenschaften
+
+Textwünsche funktionieren auf Deutsch, Englisch und gemischt. „Spiel X“ bleibt
+ein konkreter Songwunsch ohne zusätzliche Empfehlungen. „Songs zum lauten
+Mitsingen wie X“ oder „X und danach ähnliche Songs“ startet den eindeutig auf
+Spotify aufgelösten Referenzsong und anschließend einen gezielt ausgewählten
+Songpool. Die musikalischen Kriterien erscheinen in der AI-Zusammenfassung.
+Ein nicht auflösbarer Referenzsong stoppt die Anfrage mit einer Rückmeldung.
+Soundtrack-Angaben wie „Renegade von Arcane“ werden getrennt vom Künstler
+behandelt. Eine begrenzte Spotify-Titelsuche bestätigt den Serien-/Film-/Spielkontext,
+vollständigen Titel und die tatsächlichen Künstler. Verkürzte Titel dürfen hier
+einen Untertitel auslassen; mehrdeutige Aufnahmen werden nicht geraten.
+
+Folgeanfragen wie „mehr davon, aber härter“ behalten den Referenzbezug und die
+weiterhin relevanten Eigenschaften. Die Referenz wird dabei nicht erneut
+vorgezogen. Der Pool läuft gemäß der bestehenden Wiederholungsregel weiter;
+es werden keine dauerhaften Lerngewichte verändert. Die musikalische Passung
+ist eine wissensbasierte Einschätzung des Sprachmodells, keine Audioanalyse.
+Spotify bestätigt Identität, Verfügbarkeit und Katalogfilter, nicht den Vibe.
+
+Referenzanfragen laufen in zwei AI-Schritten: Zuerst wird nur der Wunsch
+interpretiert und jeder Referenzsong auf Spotify bestätigt. Danach vergleicht
+ein separater Modellaufruf Refrain, Rhythmus, Energie, Vortragsweise und
+Produktion auf Song-Ebene. Nutzerkriterien müssen mit einem Zitat aus der
+Anfrage belegt sein; Stimmgeschlecht wird nicht aus Referenzen abgeleitet.
+Kandidaten brauchen starke Bewertungen für alle Nutzerkriterien und mindestens
+zwei musikalische Referenzdimensionen. Die Bewertungen sind Modellurteile,
+keine unabhängige Audioanalyse. Unbekannte Referenzen oder eine leere Auswahl
+führen zu einer verständlichen Rückfrage statt zu einem allgemeinen Pop-Fallback.
+Es gibt maximal 12 Ergänzungen (Ziel: acht nahe Treffer); kleine, nähere Pools sind ausdrücklich erlaubt.
+Der Vergleich liefert kompakte Kriterienbewertungen und eine kurze Begründung
+pro Song statt einer langen Erklärung für jedes Einzelkriterium. Sein
+Netzwerk-Zeitlimit beträgt 90 Sekunden, das der Interpretation weiterhin 60.
+Timeouts werden nicht automatisch wiederholt; abgeschnittene Antworten werden verworfen.
+Die zweite AI-Anfrage verursacht zusätzliche Wartezeit und API-Nutzung. Reine
+Änderungen der Wiederholungsregel verwenden den bestehenden Pool weiter.
+
+Nach dem bestätigten Wiedergabestart erweitert der DJ Referenz-Auswahlen im
+Hintergrund portionsweise bis auf 36 verschiedene Titel. Ein Auftrag ist jeweils
+aktiv, höchstens sechs Versuche pro Anfrage; nach Erfolg mindestens 30 Sekunden
+Pause, bei Fehlern längerer Backoff und gegebenenfalls `Retry-After`.
+Das Ziel ist keine Mindestmenge: Bei wenigen passenden Treffern bleibt der Pool kleiner.
+Nachgeladen wird innerhalb des bestätigten Künstlerpools mit denselben
+Auswahlkriterien. Bereits ausgewählte Songs werden ausgeschlossen und Ergebnisse
+vor der Übernahme erneut auf Duplikate und aktuelle Sperren geprüft.
+Fehler verändern den vorhandenen Pool nicht. Neue AI-Anfrage, normaler Modus oder
+Quit entwerten laufende Aufträge; eine bereits laufende HTTP-Anfrage kann noch
+enden, ihr Ergebnis wird aber nicht übernommen. Alle Ergänzungen bleiben im RAM.
+
+Die bestehende Google-Spracherkennung verwendet standardmäßig `en-US`. Für
+deutsche Sprache in `.env` die Zeile `DJ_VOICE_LANGUAGE=de-DE` ergänzen und
+den Voice-Prozess neu starten. Mit `DJ_VOICE_LANGUAGE=en-US` bleibt Englisch
+aktiv. Das ist eine feste Erkennungssprache, keine automatische Umschaltung;
+englische Songtitel innerhalb deutscher Sätze können trotzdem Erkennungsfehler
+verursachen. Die Spracheinstellung betrifft nur die Transkription, nicht die AI.
+
 With the DJ running, open a second terminal and run:
 ```
 python scripts/dj_voice.py

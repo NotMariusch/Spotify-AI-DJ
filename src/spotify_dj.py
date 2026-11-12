@@ -5,18 +5,23 @@ import json
 import random
 import re
 import math
+import copy
 import urllib.request
 import urllib.parse
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
 from collections import deque
+from dataclasses import replace
 from playback_state import PlaybackTracker
 from instance_lock import InstanceLock
 from json_store import write_json_atomic
-from ai_request import ask_claude, resolve_artists_to_ids, ModelRateLimitError
+from ai_request import ask_claude, resolve_artists_to_ids, ModelRateLimitError, ModelTimeoutError
 from ai_session import AISession, is_session_reset
-from music_request import RequestValidationError, constrain_tracks, resolve_song_wishes, release_year, artist_key, song_key
+from music_request import RequestValidationError, SongWish, ReferenceSong, constrain_tracks, resolve_song_wishes, resolve_reference_contexts, release_year, artist_key, song_key
+from similarity_selection import select_similar_songs
+from ai_request import _repeat_rule_only
+from background_pool import BackgroundPool, CancellableSpotify, Cancelled
 
 # =====================
 # SPOTIFY CONFIG
@@ -59,6 +64,8 @@ ai_artist_plays = {}  # Session rotation counters, never saved or learned from.
 ai_last_artist = None
 ai_request_plan = None
 ai_request_tracks_ready = False
+ai_refill = BackgroundPool()
+ai_refill_seen = set()
 ai_song_queue = []  # Explicit wishes only; consume after confirmed playback.
 ai_song_cycle = ()  # Validated ordered requests; repeats never add other songs.
 ai_song_resolutions = {}  # Resume bounded lookups after a cooldown; request-local only.
@@ -768,7 +775,7 @@ def refresh_rate_limit_status():
     global _rate_limit_until
     if _rate_limit_until > 0 and time.time() >= _rate_limit_until:
         _rate_limit_until = 0
-        status("Spotify Rate-Limit: Wartezeit abgelaufen; erneute API-Anfragen erlaubt")
+        status("Spotify Rate-Limit: lokale Wartezeit abgelaufen; ob Spotify wieder freigibt, zeigt erst die nächste Anfrage")
 
 
 class SpotifyGateway:
@@ -842,13 +849,15 @@ def safe_play(_device_id=None, **kwargs):
     print("IS_PLAYING:false")
     publish_progress(None)
     sp.start_playback(device_id=device_id, **kwargs)
+    confirmation_problem = 'keine Playback-Daten'
     for delay in (1, 2, 2, 3):
         time.sleep(delay)
         try:
             pb = sp.current_playback()
         except RateLimitError:
             raise
-        except Exception:
+        except Exception as error:
+            confirmation_problem = f'Playback-Abfrage fehlgeschlagen ({type(error).__name__})'
             continue
         position = (pb or {}).get('progress_ms')
         if (pb and pb.get("is_playing") and (pb.get("item") or {}).get("uri") == expected_uri
@@ -857,7 +866,19 @@ def safe_play(_device_id=None, **kwargs):
                 and isinstance(position, (int, float)) and math.isfinite(position)
                 and requested_position <= position <= requested_position + 10000):
             return pb
-    status("Start nicht bestätigt; neuer DJ-Befehl erforderlich")
+        if not pb or not pb.get('item'):
+            confirmation_problem = 'Spotify meldet keinen Track'
+        elif (pb.get('device') or {}).get('id') != device_id:
+            confirmation_problem = 'Spotify meldet ein anderes Gerät'
+        elif (pb.get('item') or {}).get('uri') != expected_uri:
+            confirmation_problem = 'Spotify meldet einen anderen Track'
+        elif not pb.get('is_playing'):
+            confirmation_problem = 'gewünschter Track wird nicht abgespielt'
+        elif (pb.get('context') or {}).get('uri') != kwargs['context_uri']:
+            confirmation_problem = 'Album-Kontext nicht bestätigt'
+        else:
+            confirmation_problem = 'Startposition nicht bestätigt'
+    status(f"Start nicht bestätigt nach 4 Prüfungen: {confirmation_problem}; neuer DJ-Befehl erforderlich")
     return None
 
 
@@ -869,6 +890,10 @@ def is_alternate_version(track):
     track_text = track["name"].lower()
     track_text = track_text.replace("–", "-").replace("_", " ").replace(".", " ")
     track_text = " ".join(track_text.split())
+    # Spoken commentary is not a music version. Check the track, not an entire
+    # mixed commentary edition which can also contain ordinary studio songs.
+    if re.search(r'\bcommentary\b', track_text):
+        return True
 
     album_text = (track.get("album") or {}).get("name", "").lower()
     album_text = album_text.replace("–", "-").replace("_", " ").replace(".", " ")
@@ -1317,8 +1342,8 @@ def ensure_ai_catalogs():
 
 
 def explicit_songs_pending():
-    return (auto_mode == "ai" and ai_request_plan is not None and ai_request_plan.kind == "songs"
-            and (bool(ai_song_queue) or not ai_request_plan.continue_similar))
+    return (auto_mode == "ai" and ai_request_plan is not None
+            and (bool(ai_song_queue) or (ai_request_plan.kind == "songs" and not ai_request_plan.continue_similar)))
 
 
 def song_cycle_repeats():
@@ -1332,12 +1357,119 @@ def next_song_wish():
     return ai_song_cycle[0] if song_cycle_repeats() else None
 
 
+def prepare_reference_selection(interpreted, user_request):
+    """Verify every anchor BEFORE asking the model for a song-level comparison."""
+    if not interpreted.reference_songs:
+        return interpreted, {}
+    if _repeat_rule_only(user_request) and ai_session.plan is not None:
+        # A repeat toggle must not regenerate an already accepted music pool.
+        return interpreted, {}
+    qualify = lambda ts: select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
+    interpreted, evidence = resolve_reference_contexts(sp, interpreted, qualify)
+    known = dict(ARTISTS)
+    known.update({n: entry['id'] for n, entry in discovered_artists.items()})
+    for name, tracks in evidence.items():
+        known[name] = next(a['id'] for a in tracks[0]['artists'] if a['name'] == name)
+    cached = {n: entry.get('tracks', []) for n, entry in track_disk_cache.items()}
+    cached.update(artist_cache)
+    cached.update(evidence)
+    references = interpreted.reference_songs
+    artists = resolve_artists_to_ids(sp, [r.artist for r in references], known,
+                                     song_hints=interpreted.artist_hints + references, catalog_evidence=cached)
+    anchor_plan = replace(interpreted, kind='songs', songs=references)
+    found, missing = resolve_song_wishes(sp, anchor_plan, artists, cached, qualify)
+    if missing:
+        raise RequestValidationError('Referenzsong nicht vollständig auflösbar: ' + '; '.join(missing))
+    verified = tuple(ReferenceSong(name, track['name'], getattr(ref, 'context', ''))
+                     for ref, (name, track) in zip(references, found))
+    for name, track in found:
+        evidence.setdefault(name, []).append(track)
+    names = {artist_key(ref.artist): name for ref, (name, _) in zip(references, found)}
+    interpreted = replace(interpreted, reference_songs=verified,
+                          artists=tuple(dict.fromkeys(names.get(artist_key(n), n) for n in interpreted.artists)),
+                          songs=tuple(SongWish(r.artist, r.title) for r in verified))
+    # Reconcile restrictions before recommending; temporary anchor wishes keep
+    # this intermediate plan valid, but are never used as a fallback pool.
+    interpreted = ai_session.reconcile(interpreted, user_request)
+    print(f'  AI: {len(verified)} Referenzsongs auf Spotify bestätigt; musikalischer Vergleich folgt.')
+    selected = select_similar_songs(replace(interpreted, songs=()), user_request, ai_session.context())
+    return selected, evidence
+
+
+def service_ai_refill():
+    """Only the DJ thread merges results. Network/model work runs in a daemon."""
+    global ai_request_plan
+    result = ai_refill.poll()
+    if result is not None:
+        value, error = result
+        if error is not None:
+            if not isinstance(error, Cancelled):
+                wait = max(0, math.ceil(ai_refill.due - time.monotonic()))
+                detail = f'Rate-Limit, {wait}s Wartezeit' if hasattr(error, 'retry_after') else type(error).__name__
+                if isinstance(error, (RequestValidationError, ModelTimeoutError)):
+                    detail = str(error)
+                print(f'  AI-Nachladen: {detail}; vorhandener Pool bleibt erhalten '
+                      f'(Versuch {ai_refill.attempts}/{ai_refill.MAX_ATTEMPTS}).')
+        elif auto_mode == 'ai' and ai_request_plan and ai_request_plan.reference_songs:
+            found, proposed = value
+            ai_refill_seen.update((s.artist, s.title) for s in proposed)
+            seen = {(artist_key(n), song_key(t['name'])) for n, tracks in ai_session_catalogs.items() for t in tracks}
+            uris = {t['uri'] for tracks in ai_session_catalogs.values() for t in tracks}
+            added = []
+            for name, track in found:
+                key = artist_key(name), song_key(track['name'])
+                if (len(seen) >= ai_refill.TARGET or key in seen or track['uri'] in uris
+                        or name not in dict(ai_pool) or name in banned_artist_names
+                        or track.get('id') in banned_track_ids
+                        or not ai_session.allows(ai_request_plan, name, track)):
+                    continue
+                ai_session_catalogs.setdefault(name, []).append(track)
+                seen.add(key)
+                uris.add(track['uri'])
+                added.append(SongWish(name, track['name']))
+            if added:
+                wishes = {(artist_key(s.artist), song_key(s.title)): s for s in ai_request_plan.songs + tuple(added)}
+                ai_request_plan = replace(ai_request_plan, songs=tuple(wishes.values())[:40])
+                ai_session.plan = ai_request_plan
+            print(f'  AI-Nachladen: {len(added)} neue Spotify-geprüfte Titel; Pool enthält {len(seen)} Titel.')
+    plan = ai_request_plan
+    if (auto_mode != 'ai' or not plan or not plan.reference_songs or not ai_request_tracks_ready
+            or not tracker.control or not now_playing.get('confirmed') or not now_playing.get('playing')
+            or time.time() < _rate_limit_until):
+        return
+    count = len({(artist_key(n), song_key(t['name'])) for n, tracks in ai_session_catalogs.items() for t in tracks})
+    if not ai_refill.can_start(count):
+        return
+    catalogs = copy.deepcopy(ai_session_catalogs)
+    artists = list(ai_pool)
+    # Expand only within the verified artist pool; no new artist discovery or persistent cache writes.
+    snapshot = replace(plan, artists=tuple(n for n, _ in artists), artist_scope='fixed')
+    excluded = tuple(SongWish(n, t['name']) for n, tracks in catalogs.items() for t in tracks)
+    excluded += plan.songs + tuple(SongWish(n, title) for n, title in ai_refill_seen)
+    context = copy.deepcopy(ai_session.context())
+    user_text = ai_session.turns[-1] if ai_session.turns else 'Weitere ähnliche Songs'
+    def job(cancelled):
+        if cancelled.is_set():
+            raise Cancelled()
+        batch = select_similar_songs(snapshot, user_text, context, continuation=True, excluded=excluded,
+                                    cancel_event=cancelled)
+        if cancelled.is_set():
+            raise Cancelled()
+        client = CancellableSpotify(connect(), cancelled)
+        found, _ = resolve_song_wishes(client, batch, artists, catalogs,
+            lambda ts: select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True))
+        return found, batch.songs
+    if ai_refill.start(job, count):
+        print(f'  AI-Nachladen: erweitere den Pool im Hintergrund (Ziel {ai_refill.TARGET} Titel).')
+
+
 def ensure_structured_request():
     global ai_request_tracks_ready, ai_song_cycle
     if ai_request_tracks_ready:
         return True
     plan = ai_request_plan
     raw = {}
+    reference_found = []
     try:
         for name, _ in ai_pool:
             if name in banned_artist_names:
@@ -1346,12 +1478,25 @@ def ensure_structured_request():
                   or (plan.kind == "discovery" and plan.selection == "hits")):
                 # Resolve concrete wishes/hit hints directly instead of downloading
                 # every selected artist's complete catalog before the first song.
-                raw[name] = artist_cache.get(name, track_disk_cache.get(name, {}).get("tracks", []))
+                raw[name] = (ai_session_catalogs.get(name, [])
+                             + artist_cache.get(name, track_disk_cache.get(name, {}).get("tracks", [])))
             else:
                 print(f"  AI: preparing constrained catalog for {name}...")
                 raw[name] = get_artist_tracks(name)
         catalogs = {name: [t for t in select_best_tracks(constrain_tracks(tracks, plan, tracks))
                            if ai_session.allows(plan, name, t)] for name, tracks in raw.items()}
+        if plan.reference_songs:
+            reference_plan = replace(plan, kind='songs', songs=plan.reference_songs)
+            def qualify_reference(ts):
+                return [t for t in select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
+                        if t.get('id') not in banned_track_ids
+                        and not ({a.get('name') for a in t.get('artists', [])} & banned_artist_names)
+                        and ai_session.allows(plan, '', t, explicit=True)]
+            # Separate memo: an optional suggestion must not hide reference ambiguity.
+            reference_found, missing = resolve_song_wishes(sp, reference_plan, ai_pool, raw, qualify_reference)
+            if missing:
+                status('Referenzsong nicht eindeutig/passend auflösbar: ' + '; '.join(missing) + '. Bitte konkretisieren.')
+                return False
         if plan.songs:
             status(f"AI: Prüfe {len(plan.songs)} Songwünsche/-vorschläge auf Spotify")
             qualify = lambda ts: [t for t in select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
@@ -1377,9 +1522,14 @@ def ensure_structured_request():
             if plan.selection == "hits" and not found:
                 status("Keine passenden, auf Spotify geprüften Hits gefunden; Anfrage bitte anpassen")
                 return False
+        for name, chosen in reference_found:
+            if chosen['uri'] not in {t['uri'] for t in catalogs[name]}:
+                catalogs[name].append(chosen)
+        if reference_found and plan.context_action != 'refine':
+            ai_song_queue.extend(reference_found)
         ai_session_catalogs.update(catalogs)
         ai_request_tracks_ready = True
-        print(f"  AI: {sum(len(ts) for ts in catalogs.values())} passende Titel; {len(ai_song_queue)} konkrete Songwünsche")
+        print(f"  AI: {sum(len(ts) for ts in catalogs.values())} Spotify-geprüfte Titel; {len(ai_song_queue)} konkrete Songwünsche")
         return True
     except RequestValidationError as error:
         ai_session.note_problem(ai_session.turns[-1] if ai_session.turns else "", str(error))
@@ -1581,6 +1731,10 @@ def run_dj():
             if choice in ("1", "2", "3", "4", "5"):
                 ai_session.leave_ai()
 
+            if choice in ('quit', '1', '2', '3', '4', '5') or choice.startswith('ai:'):
+                ai_refill.reset()
+                ai_refill_seen.clear()
+
             if choice == "quit":
                 print("DJ shutting down via hotkey.")
                 sys.exit(0)
@@ -1666,9 +1820,13 @@ def run_dj():
                     print("  AI: empty request, ignoring.")
                 else:
                     print(f"  AI request: '{user_request}'")
+                    status('AI-Anfrage wird bearbeitet; warte auf Interpretation und Spotify-Prüfung')
                     try:
-                        ai_request_plan = ai_session.reconcile(ask_claude(user_request, ai_session.context()), user_request)
+                        interpreted = ask_claude(user_request, ai_session.context())
+                        interpreted, reference_evidence = prepare_reference_selection(interpreted, user_request)
+                        ai_request_plan = ai_session.reconcile(interpreted, user_request)
                         ai_session.accept(ai_request_plan, user_request)
+                        ai_session_catalogs.update(reference_evidence)
                         artist_names = ai_request_plan.artists
                         print("  AI interpretation: " + ai_request_plan.summary())
                         print("  AI session: " + ("Folgeanfrage" if ai_request_plan.context_action == 'refine' else "Neue Musikauswahl")
@@ -1685,12 +1843,14 @@ def run_dj():
                         for name, entry in discovered_artists.items():
                             if name not in all_artists:
                                 all_artists[name] = entry["id"]
+                        for name, tracks in reference_evidence.items():
+                            all_artists[name] = next(a['id'] for a in tracks[0]['artists'] if a['name'] == name)
 
                         catalog_evidence = {n: entry.get('tracks', []) for n, entry in track_disk_cache.items()}
                         catalog_evidence.update(artist_cache)
                         resolved = resolve_artists_to_ids(
                             sp, artist_names, all_artists,
-                            song_hints=ai_request_plan.artist_hints + ai_request_plan.songs,
+                            song_hints=ai_request_plan.artist_hints + ai_request_plan.reference_songs + ai_request_plan.songs,
                             catalog_evidence=catalog_evidence)
                         if not resolved:
                             status("AI: keine angefragten Künstler gefunden; neuer DJ-Befehl erforderlich")
@@ -1716,6 +1876,8 @@ def run_dj():
                         status(f"AI wartet auf deine Antwort: {error}")
                     except ModelRateLimitError as error:
                         status(f"Claude Rate-Limit (HTTP 429): {math.ceil(error.retry_after)}s warten; AI-Anfrage danach erneut senden")
+                    except ModelTimeoutError as error:
+                        status(f"AI-Zeitüberschreitung: {error}")
                     except RateLimitError as error:
                         status(f"AI-Künstlersuche durch Spotify Rate-Limit angehalten ({math.ceil(error.retry_after)}s); AI-Anfrage danach erneut senden")
                     except Exception as e:
@@ -1729,6 +1891,8 @@ def run_dj():
         observe_external_playback()
         if track_finished(allow_early=True):
             advance_to_next_track()
+
+        service_ai_refill()
 
         time.sleep(playback_poll_interval())
 

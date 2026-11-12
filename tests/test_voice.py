@@ -17,6 +17,13 @@ import dj_voice as voice
 
 
 class VoiceTests(unittest.TestCase):
+    def test_recognition_language_is_explicit_and_configurable(self):
+        for language in ('de-DE', 'en-US'):
+            with patch.dict(os.environ, {'DJ_VOICE_LANGUAGE': language}), \
+                    patch.object(voice.sr, 'AudioFile'), patch.object(voice.sr, 'Recognizer') as recognizer:
+                voice.transcribe('mock.wav')
+                self.assertEqual(recognizer.return_value.recognize_google.call_args.kwargs['language'], language)
+
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)

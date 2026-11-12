@@ -66,6 +66,8 @@ class AISession:
             if previous is None and self.pending is None and self.last_song is None:
                 raise RequestValidationError('Rückfrage: Worauf bezieht sich dein Wunsch? Bitte zuerst Musik nennen.')
             if previous:
+                if previous.reference_songs and not plan.reference_songs:
+                    raise RequestValidationError('Die Folgeanfrage hat die Referenzsongs verloren; bitte erneut versuchen.')
                 values = dict(style=plan.style or previous.style, mood=plan.mood or previous.mood,
                               artist_scope=previous.artist_scope)
                 if plan.year_start is None:
@@ -99,6 +101,9 @@ class AISession:
                        less_artists=self.less_artists if plan.less_artists is None else plan.less_artists,
                        less_songs=self.less_songs if plan.less_songs is None else plan.less_songs)
         artists = tuple(n for n in plan.artists if artist_key(n) not in excluded)
+        if any(artist_key(s.artist) in excluded or (artist_key(s.artist), song_key(s.title)) in songs
+               for s in plan.reference_songs):
+            raise RequestValidationError('Ein Referenzsong widerspricht deinen Session-Ausschlüssen. Bitte die Anfrage anpassen.')
         if plan.kind == 'songs' and (len(artists) != len(plan.artists) or any(
                 (artist_key(s.artist), song_key(s.title)) in songs for s in plan.songs)):
             raise RequestValidationError('Ein Songwunsch widerspricht deinen Session-Ausschlüssen. Mit "Neue AI-Session" zurücksetzen.')

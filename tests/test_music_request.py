@@ -14,6 +14,7 @@ import spotify_dj as dj
 from music_request import (parse_music_request, RequestValidationError, constrain_tracks,
                            resolve_song_wishes, check_explicit_period, check_request_kind)
 from playback_state import PlaybackTracker
+from music_request import resolve_reference_contexts
 
 
 def request(**overrides):
@@ -34,6 +35,42 @@ def song(title='Hit', year='2003', artist='artist', isrc=None, **overrides):
 
 
 class InterpretationTests(unittest.TestCase):
+    def test_reference_schema_and_summary(self):
+        plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')],
+                       reference_songs=[dict(artist='Artist', title='Anchor')],
+                       similarity_traits=['starker Mitsing-Refrain', 'hohe Energie'])
+        self.assertIn('starker Mitsing-Refrain', plan.summary())
+        self.assertEqual(plan.reference_songs[0].title, 'Anchor')
+        for override in (dict(selection='any'), dict(similarity_traits=[]),
+                         dict(reference_songs=[dict(artist='Artist', title='Anchor', uri='fake')])):
+            from dataclasses import asdict
+            data = json.loads(json.dumps(asdict(plan)))
+            data.update(override)
+            with self.assertRaises(RequestValidationError):
+                parse_music_request(data)
+
+    def test_reference_interpretation_defers_candidates_until_spotify_confirmation(self):
+        data = dict(kind='discovery', artists=['Artist'], songs=[], year_start=None, year_end=None,
+                    style='', mood='', selection='hits', continue_similar=False,
+                    reference_songs=[dict(artist='Artist', title='Anchor')], similarity_traits=['Mitsingen'])
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'}), \
+                patch.object(ai_request, '_request_model', return_value=data) as model:
+            plan = ai_request.ask_claude('Songs zum Mitsingen wie Anchor')
+            self.assertEqual(plan.songs, ())
+            model.assert_called_once()
+
+    def test_german_and_english_reference_requests_use_same_pipeline(self):
+        from dataclasses import asdict
+        plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')],
+                       reference_songs=[dict(artist='Artist', title='Anchor')],
+                       similarity_traits=['starker Mitsing-Refrain'])
+        for text in ('Songs zum Mitsingen wie Anchor', 'Songs to sing along to like Anchor'):
+            with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'}), \
+                    patch.object(ai_request, '_request_model', return_value=json.loads(json.dumps(asdict(plan)))) as model:
+                self.assertEqual(ai_request.ask_claude(text), plan)
+                payload = json.loads(model.call_args.args[0])
+                self.assertIn('NOT verified audio analysis', payload['system'])
+
     def test_childhood_pop_is_discovery_even_if_model_returns_fixed_song_list(self):
         plan = request(kind='songs', songs=[dict(artist='Artist', title='SexyBack'), dict(artist='Artist', title='Toxic')])
         fixed = check_request_kind(plan, '2000s pop from my childhood please')
@@ -105,6 +142,123 @@ class InterpretationTests(unittest.TestCase):
         self.assertEqual(raised.exception.retry_after, 12)
         call.assert_called_once()
         self.assertNotIn('private error body', str(raised.exception))
+
+    def test_model_timeout_has_clear_message_and_no_automatic_duplicate(self):
+        for error in (TimeoutError(), ai_request.urllib.error.URLError(TimeoutError())):
+            with patch.object(ai_request.urllib.request, 'urlopen', side_effect=error) as call:
+                with self.assertRaises(ai_request.ModelTimeoutError):
+                    ai_request._request_model(b'{}', 'test')
+                call.assert_called_once()
+                self.assertEqual(call.call_args.kwargs['timeout'], 60)
+
+    def test_timeout_during_response_read_is_also_handled(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.side_effect = TimeoutError()
+        with patch.object(ai_request.urllib.request, 'urlopen', return_value=response) as call:
+            with self.assertRaises(ai_request.ModelTimeoutError):
+                ai_request._request_model(b'{}', 'test')
+            call.assert_called_once()
+
+    def test_comparison_timeout_names_stage_without_retry(self):
+        with patch.object(ai_request.urllib.request, 'urlopen', side_effect=TimeoutError()) as call:
+            with self.assertRaisesRegex(ai_request.ModelTimeoutError, 'Musikalischer Vergleich.*90s'):
+                ai_request._request_model(b'{}', 'test', timeout_seconds=90, stage='Musikalischer Vergleich')
+            call.assert_called_once()
+            self.assertEqual(call.call_args.kwargs['timeout'], 90)
+
+    def test_truncated_response_is_not_parsed_as_a_music_pool(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = json.dumps(dict(stop_reason='max_tokens', content=[dict(text='{}')])).encode()
+        with patch.object(ai_request.urllib.request, 'urlopen', return_value=response):
+            with self.assertRaisesRegex(RequestValidationError, 'abgeschnitten'):
+                ai_request._request_model(b'{}', 'test')
+
+
+class SoundtrackReferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.sp = Mock()
+        self.plan = request(artists=['Arcane (TV Series)', 'Artist'], selection='hits',
+                            songs=[dict(artist='Artist', title='Hit')],
+                            reference_songs=[dict(artist='Arcane (TV Series)', title='Renegade')],
+                            similarity_traits=['starker Mitsing-Refrain'], year_start=None, year_end=None)
+        self.track = song('Renegade (We Never Run) - from the series Arcane League of Legends', '2024',
+                          id='Recording', uri='spotify:track:Recording', isrc='USABC2400001')
+        self.track['artists'] = [dict(id='Raja', name='Raja Kumari'), dict(id='Stefflon', name='Stefflon Don')]
+        self.track['album']['name'] = 'Arcane League of Legends: Season 2'
+        self.sp.search.return_value = dict(tracks=dict(items=[self.track]))
+
+    def resolve(self, plan=None):
+        return resolve_reference_contexts(self.sp, plan or self.plan,
+            lambda ts: dj.select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True))
+
+    def test_series_is_resolved_from_actual_track_credits_and_full_title(self):
+        fixed, evidence = self.resolve()
+        self.assertEqual(fixed.reference_songs[0].artist, 'Raja Kumari')
+        self.assertEqual(fixed.reference_songs[0].title, self.track['name'])
+        self.assertEqual(fixed.artists, ('Raja Kumari', 'Artist'))
+        self.assertEqual(evidence['Raja Kumari'], [self.track])
+        self.sp.search.assert_called_once()
+        self.assertNotIn('artist:', self.sp.search.call_args.kwargs['q'])
+        from dataclasses import asdict
+        self.assertEqual(parse_music_request(json.loads(json.dumps(asdict(fixed)))), fixed)
+
+    def test_explicit_context_with_complete_title_and_real_performer(self):
+        from dataclasses import replace
+        from music_request import ReferenceSong
+        plan = replace(self.plan, artists=('Stefflon Don', 'Artist'),
+                       reference_songs=(ReferenceSong('Stefflon Don', 'Renegade (We Never Run)', 'Arcane'),))
+        fixed, _ = self.resolve(plan)
+        self.assertEqual(fixed.reference_songs[0].artist, 'Stefflon Don')
+
+    def test_explicit_context_type_label_is_not_required_in_catalog(self):
+        from dataclasses import replace
+        from music_request import ReferenceSong
+        for performer in ('Arcane (TV Series)', 'Arcane', 'Stefflon Don'):
+            plan = replace(self.plan, artists=(performer, 'Artist'),
+                           reference_songs=(ReferenceSong(performer, 'Renegade', 'Arcane (TV Series)'),))
+            fixed, _ = self.resolve(plan)
+            self.assertEqual(fixed.reference_songs[0].context, 'Arcane')
+            self.assertNotIn('TV Series', self.sp.search.call_args.kwargs['q'])
+
+    def test_wrong_context_unrelated_title_and_live_version_are_rejected(self):
+        for changes in (dict(name='Renegade Love'), dict(name='Renegade (Live)'),
+                        dict(name='Renegade', album={**self.track['album'], 'name': 'Unrelated'})):
+            self.sp.reset_mock()
+            self.sp.search.return_value = dict(tracks=dict(items=[{**self.track, **changes}]))
+            with self.assertRaises(RequestValidationError):
+                self.resolve()
+            self.assertEqual(self.sp.search.call_count, 2)
+
+    def test_multiple_recordings_do_not_choose_first_result(self):
+        other = copy.deepcopy(self.track)
+        other['external_ids']['isrc'] = 'USABC2400002'
+        self.sp.search.return_value = dict(tracks=dict(items=[self.track, other]))
+        with self.assertRaises(RequestValidationError):
+            self.resolve()
+
+    def test_context_does_not_override_explicit_different_artist(self):
+        from dataclasses import replace
+        from music_request import ReferenceSong
+        plan = replace(self.plan, reference_songs=(ReferenceSong('Artist', 'Renegade', 'Arcane'),))
+        with self.assertRaises(RequestValidationError):
+            self.resolve(plan)
+
+    def test_rate_limit_propagates_without_more_searches(self):
+        self.sp.search.side_effect = dj.RateLimitError(20)
+        with self.assertRaises(dj.RateLimitError):
+            self.resolve()
+        self.sp.search.assert_called_once()
+
+    def test_ordinary_reference_needs_no_context_search(self):
+        from dataclasses import replace
+        from music_request import SongWish
+        plan = replace(self.plan, reference_songs=(SongWish('Artist', 'Hit'),))
+        self.assertEqual(self.resolve(plan), (plan, {}))
+        self.sp.search.assert_not_called()
 
 
 class EraEvidenceTests(unittest.TestCase):
@@ -235,6 +389,128 @@ class StructuredPlaybackTests(unittest.TestCase):
 
     def confirm(self, **kwargs):
         return dict(item={'uri': kwargs['offset']['uri']}, is_playing=True, progress_ms=0, device={'id': 'pc'})
+
+    def reference_plan(self, **overrides):
+        return request(selection='hits', songs=[dict(artist='Artist', title='Hit')],
+                       reference_songs=[dict(artist='Artist', title='Anchor')],
+                       similarity_traits=['starker Mitsing-Refrain'], **overrides)
+
+    def test_reference_first_then_only_matching_pool_without_learning(self):
+        dj.ai_request_plan = self.reference_plan()
+        dj.artist_cache['Artist'] = [song('Anchor'), song('Hit'), song('Unrelated')]
+        before = copy.deepcopy(dj.memory)
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        self.assertEqual(dj.now_playing['uri'], song('Anchor')['uri'])
+        self.assertFalse(dj.explicit_songs_pending())
+        self.assertEqual({t['name'] for t in dj.ai_session_catalogs['Artist']}, {'Anchor', 'Hit'})
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True, interrupted=False))
+        self.assertEqual(dj.now_playing['uri'], song('Hit')['uri'])
+        self.assertEqual(dj.memory, before)
+        dj.save_memory.assert_not_called()
+        self.fetch.assert_not_called()
+
+    def test_verified_soundtrack_evidence_is_used_for_first_playback(self):
+        fixture = SoundtrackReferenceTests()
+        fixture.setUp()
+        plan, evidence = fixture.resolve()
+        dj.ai_request_plan = plan
+        dj.ai_pool = [('Raja Kumari', 'Raja'), ('Artist', 'artist')]
+        dj.ai_artists = dict(dj.ai_pool)
+        dj.ai_session_catalogs.update(evidence)
+        dj.artist_cache['Artist'] = [song('Hit')]
+        self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
+        self.assertEqual(dj.now_playing['uri'], fixture.track['uri'])
+        self.sp.search.assert_not_called()
+        self.fetch.assert_not_called()
+        dj.save_memory.assert_not_called()
+
+    def test_all_references_confirmed_before_musical_selection(self):
+        from dataclasses import replace
+        plan = self.reference_plan()
+        dj.artist_cache['Artist'] = [song('Anchor')]
+        with patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]), \
+                patch.object(dj, 'select_similar_songs', return_value=plan) as select:
+            result, evidence = dj.prepare_reference_selection(replace(plan, songs=()), 'Songs wie Anchor')
+            self.assertEqual(evidence['Artist'][0]['uri'], song('Anchor')['uri'])
+            self.assertEqual(select.call_args.args[0].reference_songs[0].title, 'Anchor')
+            self.assertEqual(select.call_args.args[0].songs, ())
+            self.start.assert_not_called()
+            dj.save_memory.assert_not_called()
+
+    def test_missing_reference_never_triggers_recommendation_call(self):
+        with patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]), \
+                patch.object(dj, 'select_similar_songs') as select:
+            with self.assertRaises(RequestValidationError):
+                dj.prepare_reference_selection(self.reference_plan(), 'Songs wie Anchor')
+            select.assert_not_called()
+            self.start.assert_not_called()
+
+    def test_repeat_only_change_reuses_reference_pool_without_model_or_search(self):
+        dj.ai_session.plan = self.reference_plan()
+        with patch.object(dj, 'select_similar_songs') as select:
+            plan, evidence = dj.prepare_reference_selection(dj.ai_session.plan, 'Wiederholungen erlauben')
+            self.assertEqual(plan, dj.ai_session.plan)
+            self.sp.search.assert_not_called()
+            select.assert_not_called()
+
+    def test_background_merge_deduplicates_and_never_changes_permanent_learning(self):
+        from music_request import SongWish
+        dj.ai_request_plan = self.reference_plan()
+        dj.ai_session_catalogs['Artist'] = [song('Hit')]
+        before = copy.deepcopy(dj.memory)
+        controller = Mock()
+        controller.poll.return_value = (([('Artist', song('Hit')), ('Artist', song('New'))],
+                                         (SongWish('Artist', 'New'),)), None)
+        controller.TARGET = 36
+        with patch.object(dj, 'ai_refill', controller), patch.object(dj, 'ai_refill_seen', set()):
+            dj.service_ai_refill()
+            self.assertEqual([t['name'] for t in dj.ai_session_catalogs['Artist']], ['Hit', 'New'])
+            self.assertEqual(dj.memory, before)
+            dj.save_memory.assert_not_called()
+            dj.save_track_cache.assert_not_called()
+            self.start.assert_not_called()
+
+    def test_background_error_keeps_pool_and_does_not_restart_playback(self):
+        dj.ai_request_plan = self.reference_plan()
+        dj.ai_session_catalogs['Artist'] = [song('Hit')]
+        controller = Mock()
+        controller.poll.return_value = (None, TimeoutError())
+        controller.due = 0
+        controller.attempts, controller.MAX_ATTEMPTS = 1, 6
+        with patch.object(dj, 'ai_refill', controller):
+            dj.service_ai_refill()
+            self.assertEqual(dj.ai_session_catalogs['Artist'], [song('Hit')])
+            self.start.assert_not_called()
+
+    def test_background_result_rechecks_current_bans(self):
+        dj.ai_request_plan = self.reference_plan()
+        dj.ai_session_catalogs['Artist'] = [song('Hit')]
+        dj.banned_track_ids.add(song('New')['id'])
+        controller = Mock()
+        controller.poll.return_value = (([('Artist', song('New'))], ()), None)
+        controller.TARGET = 36
+        with patch.object(dj, 'ai_refill', controller), patch.object(dj, 'ai_refill_seen', set()):
+            dj.service_ai_refill()
+            self.assertEqual(dj.ai_session_catalogs['Artist'], [song('Hit')])
+
+    def test_missing_reference_stops_without_substitute(self):
+        dj.ai_request_plan = self.reference_plan()
+        dj.artist_cache['Artist'] = [song('Hit')]
+        self.assertFalse(dj.play_artist('Artist', 'ai', no_judge=True))
+        self.start.assert_not_called()
+        self.assertFalse(dj.ai_request_tracks_ready)
+
+    def test_refinement_keeps_anchor_but_does_not_queue_it_again(self):
+        dj.ai_request_plan = self.reference_plan(context_action='refine')
+        dj.artist_cache['Artist'] = [song('Anchor'), song('Hit')]
+        self.assertTrue(dj.ensure_structured_request())
+        self.assertEqual(dj.ai_song_queue, [])
+
+    def test_reference_conflict_with_session_ban_requires_clarification(self):
+        from music_request import SongWish
+        dj.ai_session.excluded_songs = (SongWish('Artist', 'Anchor'),)
+        with self.assertRaises(RequestValidationError):
+            dj.ai_session.reconcile(self.reference_plan())
 
     def test_childhood_request_can_play_despite_ambiguous_copies_and_unresolved_artist(self):
         plan = request(kind='songs', artists=['Artist', 'Unresolved'], songs=[

@@ -250,6 +250,22 @@ class IntegrationTests(unittest.TestCase):
         studio['album']['name'] = 'Believe'
         self.assertEqual(dj.select_best_tracks([studio]), [studio])
 
+    def test_commentary_excluded_but_studio_and_non_lp_tracks_remain(self):
+        studio, commentary, bonus = track(), track('spotify:track:commentary'), track('spotify:track:bonus')
+        studio['name'] = 'Sad'
+        studio['album']['name'] = 'Overexposed (Commentary Version)'
+        commentary['name'] = 'Sad - Commentary'
+        bonus['name'] = 'Losing My Mind - Non-LP Version'
+        self.assertEqual(dj.select_best_tracks([studio, commentary, bonus]), [studio, bonus])
+        self.assertEqual(dj.select_best_tracks([commentary], min_duration_ms=1000, allow_compilations=True), [])
+
+    def test_unconfirmed_start_explains_missing_playback_without_retrying_start(self):
+        dj.sp.current_playback.return_value = dict(item=None, is_playing=False)
+        with patch.object(dj, 'status') as report:
+            self.assertFalse(dj.start_selected('Artist', 'ai', track(), True))
+            self.assertIn('Spotify meldet keinen Track', report.call_args.args[0])
+        dj.sp.start_playback.assert_called_once()
+
     def test_invalid_album_metadata_not_played(self):
         for album in (None, {}, {'uri': 'broken'}, {'uri': None}, {'uri': 'spotify:album:valid'}, 'broken'):
             t = track()

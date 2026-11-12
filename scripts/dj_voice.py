@@ -27,12 +27,14 @@ import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
 from pathlib import Path
+from dotenv import load_dotenv
 
 IS_LINUX = platform.system() == "Linux"
 if not IS_LINUX:
     import keyboard
 
 BASE_DIR   = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / '.env')
 INPUT_FILE = BASE_DIR / "data" / "dj_input.txt"
 sys.path.insert(0, str(BASE_DIR / "src"))
 from instance_lock import InstanceLock
@@ -105,7 +107,7 @@ def transcribe(wav_path: str):
     with sr.AudioFile(wav_path) as source:
         audio = r.record(source)
     try:
-        return r.recognize_google(audio)
+        return r.recognize_google(audio, language=os.getenv('DJ_VOICE_LANGUAGE', 'en-US').strip() or 'en-US')
     except sr.UnknownValueError:
         print("  Could not understand audio.")
         log_to_server("Keine Sprache erkannt. Bitte erneut versuchen.")

@@ -20,6 +20,13 @@ class ModelRateLimitError(Exception):
         self.retry_after = retry_after
 
 
+class ModelTimeoutError(Exception):
+    pass
+
+
+MODEL_TIMEOUT_SECONDS = 60
+
+
 def _repeat_rule_only(text):
     return re.fullmatch(
         r'(?:heute\s+)?(?:bitte\s+)?keine\s+wiederholungen(?:\s+von\s+vorhin)?[.!?]*'
@@ -71,6 +78,36 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
         "Do not use album names as song titles. They do not restrict free catalog selection. "
         "Optional clarification: a short German question or null.\n"
         "Rules:\n"
+        "- Understand German, English and mixed-language requests equally. Correct obvious title typos only "
+        "when attribution is unambiguous; otherwise clarify. Never invent a soundtrack attribution.\n"
+        "- Output reference_songs ([{artist,title}]) and similarity_traits ([up to 6 short German descriptions]). "
+        "Reference entries may additionally contain context: the series, film or game name (otherwise empty). "
+        "'Renegade von Arcane' means a soundtrack context, NOT an artist called Arcane (TV Series). "
+        "Preserve this context separately and use the real performing artist and complete title if known. "
+        "If the performer is unknown but the soundtrack is named, put that context name in artist as a "
+        "temporary unresolved label AND set context; Spotify must resolve it before any artist lookup. "
+        "Do not fabricate performers. Never replace a soundtrack context with a similarly named artist. "
+        "Default both to []. A bare 'play X' stays kind=songs with NO added recommendations. "
+        "For 'songs to sing loudly like X', 'X and similar songs afterwards', or equivalent German wishes, "
+        "use discovery/hits, continue_similar=false, reference_songs containing the actual requested anchors, "
+        "and songs=[]: this is ONLY the reference interpretation phase. Do NOT select recommendations or "
+        "recommendation artists yet. Spotify must confirm ALL references before a separate song-level "
+        "comparison selects a pool. artists contains only reference artists (or an explicit artist restriction). "
+        "This overrides all generic hits rules below. References play first automatically. "
+        "Include reference artists in artists; attribution is not a fixed artist restriction. "
+        "similarity_traits must prioritize what the USER enjoys (e.g. powerful singalong chorus, high energy) "
+        "over generic genre similarity. In this phase, include ONLY user-requested traits; if absent use "
+        "'musikalische Nähe zur Referenz'. Do not infer gender of vocals, artist demographics, nationality "
+        "or genre restrictions from the references. style contains ONLY an explicit user genre restriction, "
+        "otherwise empty. A reference's artist or soundtrack category is NOT a genre restriction. "
+        "Check every proposed song against these traits before returning it; omit weak/uncertain matches, "
+        "even if fewer songs remain. This is a knowledge-based recommendation, NOT verified audio analysis. "
+        "Never claim to have listened or measured audio. A strong chorus request must not become arbitrary "
+        "songs by the same artists. On 'more like this but harder/less rap', preserve reference_songs and "
+        "the singalong/other relevant traits, update only the requested dimensions and regenerate candidates. "
+        "Use context_action=refine for this; references will NOT replay at every refinement. "
+        "For a genuinely new unrelated request clear references and traits. If the reference itself is "
+        "uncertain, ask a short clarification rather than silently substituting another song.\n"
         "- Preserve all explicit era/style/mood constraints. 2000s/2000er means 2000 through 2009; "
         "2010s means 2010 through 2019. No year constraint means BOTH year fields null. "
         "Do not guess a user's childhood decade if they did not give one.\n"
@@ -145,12 +182,12 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
     }).encode("utf-8")
 
     data = _request_model(payload, api_key)
-    plan = check_request_kind(parse_music_request(data, allow_empty_hit_refinement=True), user_request, session_context)
+    plan = check_request_kind(parse_music_request(data, allow_empty_hit_refinement=True, allow_reference_planning=True), user_request, session_context)
     plan = check_explicit_period(plan, user_request)
     plan = preserve_refinement_selection(plan, previous, user_request)
     if repeat_policy is not None:
         plan = replace(plan, repeat_policy=repeat_policy, avoid_session_repeats=repeat_policy == 'session')
-    if plan.kind == 'discovery' and plan.selection == 'hits' and not plan.songs:
+    if plan.kind == 'discovery' and plan.selection == 'hits' and not plan.songs and not plan.reference_songs:
         if previous is None:
             raise RequestValidationError('Für die Hit-Folgeanfrage fehlt eine bestehende Auswahl. Bitte zuerst einen Musikwunsch nennen.')
         # One bounded repair only. Never pretend the old songs match a new mood.
@@ -177,7 +214,12 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
     return plan
 
 
-def _request_model(payload, api_key):
+def _request_model(payload, api_key, *, timeout_seconds=MODEL_TIMEOUT_SECONDS, stage='Musikauswahl', cancel_event=None):
+    def check_cancelled():
+        if cancel_event is not None and cancel_event.is_set():
+            from background_pool import Cancelled
+            raise Cancelled()
+    check_cancelled()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
         data=payload,
@@ -190,11 +232,18 @@ def _request_model(payload, api_key):
     )
 
     data = None
+    print(f'  AI: {stage} angefragt; Netzwerk-Zeitlimit {timeout_seconds}s.', flush=True)
     for attempt in range(3):
+        check_cancelled()
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            check_cancelled()
             break
+        except TimeoutError:
+            # The server may already have processed this paid request. Do not
+            # automatically submit it again after an ambiguous network timeout.
+            raise ModelTimeoutError(f'{stage}: Claude-Antwort nicht rechtzeitig empfangen (Netzwerk-Zeitlimit {timeout_seconds}s). Bitte die Anfrage erneut senden.') from None
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 try:
@@ -206,13 +255,27 @@ def _request_model(payload, api_key):
                 raise ModelRateLimitError(wait) from None
             if e.code == 529 and attempt < 2:
                 import time
+                e.close()
+                check_cancelled()
                 print(f"  Claude overloaded (529), retrying in 3s...")
-                time.sleep(3)
+                if cancel_event is None:
+                    time.sleep(3)
+                else:
+                    cancel_event.wait(3)
+                    check_cancelled()
                 continue
             body = e.read().decode("utf-8")
             raise ValueError(f"Claude API {e.code}: {body}")
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise ModelTimeoutError(f'{stage}: Claude-Antwort nicht rechtzeitig empfangen (Netzwerk-Zeitlimit {timeout_seconds}s). Bitte die Anfrage erneut senden.') from None
+            raise
     if data is None:
         raise ValueError("Claude API failed after 3 attempts")
+
+    if data.get('stop_reason') == 'max_tokens':
+        raise RequestValidationError(f'{stage}: Claude-Antwort wurde wegen ihrer Länge abgeschnitten; '
+                                     'keine unvollständige Auswahl übernommen. Bitte erneut versuchen.')
 
     raw = data["content"][0]["text"].strip()
 

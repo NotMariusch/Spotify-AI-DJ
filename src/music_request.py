@@ -31,6 +31,11 @@ class SongWish:
 
 
 @dataclass(frozen=True)
+class ReferenceSong(SongWish):
+    context: str = ''  # Soundtrack/series/game, never an artist identity.
+
+
+@dataclass(frozen=True)
 class MusicRequest:
     kind: str
     artists: tuple
@@ -50,18 +55,23 @@ class MusicRequest:
     repeat_policy: str = 'inherit'  # inherit, recent, session, allow; temporary only.
     less_artists: tuple | None = None  # None inherits; () explicitly clears soft preferences.
     less_songs: tuple | None = None
+    reference_songs: tuple = ()
+    similarity_traits: tuple = ()
 
     def summary(self):
         period = f'{self.year_start}–{self.year_end}' if self.year_start is not None else 'ohne Jahresgrenze'
         selection = 'bekannte Hits' if self.selection == 'hits' else 'freie Titelauswahl'
         if self.kind == 'songs':
             selection = f'{len(self.songs)} konkrete Songwünsche in Reihenfolge'
-        return f'{period} · {self.style or "kein Genre vorgegeben"} · {self.mood or "keine Stimmung vorgegeben"} · {selection}'
+        if self.reference_songs:
+            selection = 'ähnlich zu ' + ', '.join(f'{s.artist} — {s.title}' for s in self.reference_songs)
+        traits = ' · Auswahl: ' + ', '.join(self.similarity_traits) if self.similarity_traits else ''
+        return f'{period} · {self.style or "kein Genre vorgegeben"} · {self.mood or "keine Stimmung vorgegeben"} · {selection}{traits}'
 
 
-def parse_music_request(data, allow_empty_hit_refinement=False):
+def parse_music_request(data, allow_empty_hit_refinement=False, allow_reference_planning=False):
     fields = {'kind', 'artists', 'songs', 'year_start', 'year_end', 'style', 'mood', 'selection', 'continue_similar'}
-    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats', 'artist_hints', 'repeat_policy', 'less_artists', 'less_songs'}
+    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats', 'artist_hints', 'repeat_policy', 'less_artists', 'less_songs', 'reference_songs', 'similarity_traits'}
     if not isinstance(data, dict) or set(data) - fields - optional or not fields <= set(data):
         raise RequestValidationError('Ungültige strukturierte AI-Antwort; bitte erneut versuchen.')
     clarification = data.get('clarification')
@@ -102,7 +112,8 @@ def parse_music_request(data, allow_empty_hit_refinement=False):
         parsed.append(SongWish(song['artist'].strip(), song['title'].strip()))
     empty_refinement = (allow_empty_hit_refinement and data['kind'] == 'discovery'
                         and data.get('context_action') == 'refine' and data['selection'] == 'hits')
-    if (data['kind'] == 'songs' or data['selection'] == 'hits') and not parsed and not empty_refinement:
+    reference_planning = allow_reference_planning and data['kind'] == 'discovery' and bool(data.get('reference_songs'))
+    if (data['kind'] == 'songs' or data['selection'] == 'hits') and not parsed and not empty_refinement and not reference_planning:
         raise RequestValidationError('Für Songwünsche/bekannte Hits fehlen konkrete Songvorschläge.')
     hints = data.get('artist_hints', [])
     if not isinstance(hints, list) or len(hints) > 24:
@@ -155,10 +166,129 @@ def parse_music_request(data, allow_empty_hit_refinement=False):
                 raise RequestValidationError('Die Weniger-Auswahl braucht Künstler und Titel, keine Spotify-IDs.')
             wishes.append(SongWish(song['artist'].strip(), song['title'].strip()))
         less_songs = tuple(wishes)
+    references = data.get('reference_songs', [])
+    traits = data.get('similarity_traits', [])
+    if not isinstance(references, list) or len(references) > 8:
+        raise RequestValidationError('Maximal acht Referenzsongs pro Anfrage.')
+    parsed_references = []
+    for ref in references:
+        if (not isinstance(ref, dict) or not {'artist', 'title'} <= set(ref)
+                or set(ref) - {'artist', 'title', 'context'} or any(
+                not isinstance(ref[k], str) or not 1 <= len(ref[k].strip()) <= 200 for k in ('artist', 'title'))
+                or not isinstance(ref.get('context', ''), str) or len(ref.get('context', '')) > 160
+                or artist_key(ref['artist']) not in allowed or not song_key(ref['title'])):
+            raise RequestValidationError('Referenzsongs brauchen eindeutige Künstler und Titel, keine Spotify-IDs.')
+        parsed_references.append(ReferenceSong(ref['artist'].strip(), ref['title'].strip(), ref.get('context', '').strip()))
+    if (not isinstance(traits, list) or len(traits) > 6 or any(
+            not isinstance(t, str) or not 1 <= len(t.strip()) <= 100 for t in traits)):
+        raise RequestValidationError('Ungültige musikalische Auswahlkriterien.')
+    if references and (data['kind'] != 'discovery' or data['selection'] != 'hits' or not traits):
+        raise RequestValidationError('Referenzmusik braucht konkrete Vorschläge und musikalische Auswahlkriterien.')
     return MusicRequest(data['kind'], artists, tuple(parsed), start, end,
                         data['style'].strip(), data['mood'].strip(), data['selection'], data['continue_similar'],
                         action, scope, tuple(dict.fromkeys(n.strip() for n in excluded)), tuple(excluded_wishes), avoid, tuple(parsed_hints), repeat_policy,
-                        less_artists, less_songs)
+                        less_artists, less_songs, tuple(parsed_references), tuple(t.strip() for t in traits))
+
+
+def resolve_reference_contexts(sp, plan, qualify):
+    """Resolve soundtrack anchors from catalog evidence, at most two searches each.
+
+    Only this contextual path accepts omitted subtitles. Ordinary artist/title
+    wishes retain their exact matching and recording ambiguity checks.
+    """
+    references, replacements, evidence = [], {}, {}
+    for ref in plan.reference_songs:
+        marker = re.search(r'\s*\((?:TV Series|TV-Serie|Soundtrack|Film|Movie|Game|Serie)\)\s*$', ref.artist, re.I)
+        context = getattr(ref, 'context', '') or (ref.artist[:marker.start()].strip() if marker else '')
+        # Models can repeat the type label in the explicit context field too.
+        # It is classification metadata, not part of the soundtrack's name.
+        context = re.sub(r'\s*\((?:TV Series|TV-Serie|Soundtrack|Film|Movie|Game|Serie)\)\s*$', '', context, flags=re.I).strip()
+        if not context:
+            references.append(ref)
+            continue
+        def quoted(value):
+            return value.replace('"', ' ').replace('\\', ' ')
+        def words(value):
+            return re.findall(r'\w+', unicodedata.normalize('NFKC', value).casefold())
+        def contains_phrase(value, phrase):
+            return ' ' + ' '.join(words(phrase)) + ' ' in ' ' + ' '.join(words(value)) + ' '
+        def title_matches(title):
+            if song_key(title) == song_key(ref.title):
+                return True
+            # A subtitle and an explicit soundtrack suffix may be omitted, but
+            # not arbitrary trailing words ('Renegade Love' is a different title).
+            base = re.split(r'\s+[-–]\s+(?:from|aus)\b', title, maxsplit=1, flags=re.I)[0]
+            if song_key(base) == song_key(ref.title):
+                return True
+            base = re.sub(r'\s*\([^()]*\)\s*$', '', base).strip()
+            return song_key(base) == song_key(ref.title)
+        candidates = []
+        print(f'  AI: Prüfe Soundtrack-Referenz „{ref.title}“ im Kontext „{context}“ auf Spotify.', flush=True)
+        for query in (f'track:"{quoted(ref.title)}" "{quoted(context)}"',
+                      f'{quoted(ref.title)} {quoted(context)}'):
+            result = sp.search(q=query, type='track', limit=10, market='DE')
+            for track in (result or {}).get('tracks', {}).get('items', []):
+                album = track.get('album') or {}
+                if (not title_matches(track.get('name', ''))
+                        or not (contains_phrase(track.get('name', ''), context)
+                                or contains_phrase(album.get('name', ''), context))):
+                    continue
+                artists = track.get('artists') or []
+                if (not artists or any(not a.get('id') or not a.get('name') for a in artists)
+                        or not re.fullmatch(r'spotify:track:[A-Za-z0-9]+', track.get('uri', ''))
+                        or not re.fullmatch(r'spotify:album:[A-Za-z0-9]+', album.get('uri', ''))):
+                    continue
+                # When the model supplies a real artist, the context cannot
+                # silently license changing that attribution to someone else.
+                placeholder = marker or artist_key(ref.artist) == artist_key(context)
+                if not placeholder and artist_key(ref.artist) not in {artist_key(a['name']) for a in artists}:
+                    continue
+                if qualify(constrain_tracks([track], plan, [track])):
+                    candidates.append(track)
+            if candidates:
+                break
+        identities = {(tuple(sorted(a['id'] for a in t['artists'])), song_key(t['name'])) for t in candidates}
+        recordings = {recording_isrc(t) for t in candidates if recording_isrc(t)}
+        durations = [t.get('duration_ms', 0) for t in candidates]
+        if (len(identities) != 1 or len(recordings) > 1
+                or (durations and max(durations) - min(durations) > 5000)):
+            reason = 'keinen passenden Treffer gefunden' if not candidates else 'mehrere mögliche Aufnahmen gefunden'
+            raise RequestValidationError(f'Referenz „{ref.title}“ aus „{context}“: {reason}. Bitte vollständigen Titel und Künstler nennen.')
+        chosen = candidates[0]
+        primary = (next((a for a in chosen['artists'] if artist_key(a['name']) == artist_key(ref.artist)), None)
+                   or chosen['artists'][0])
+        fixed = ReferenceSong(primary['name'], chosen['name'], context)
+        references.append(fixed)
+        replacements.setdefault(artist_key(ref.artist), []).append((ref, fixed))
+        evidence.setdefault(primary['name'], []).append(chosen)
+        print(f'  AI: Soundtrack-Referenz auf Spotify bestätigt: {fixed.artist} — {fixed.title}')
+    if not replacements:
+        return plan, evidence
+    artists = []
+    for name in plan.artists:
+        artists.extend([fixed.artist for _, fixed in replacements[artist_key(name)]]
+                       if artist_key(name) in replacements else [name])
+    artists = tuple(dict.fromkeys(artists))
+    if len(artists) > 12:
+        raise RequestValidationError('Zu viele Künstler nach der Referenzauflösung; bitte weniger Referenzsongs nennen.')
+    def update_wishes(wishes):
+        updated = []
+        for wish in wishes:
+            changed = replacements.get(artist_key(wish.artist))
+            if not changed:
+                updated.append(wish)
+            else:
+                # Never transfer invented songs from a soundtrack pseudo-artist.
+                for old, fixed in changed:
+                    if song_key(wish.title) in (song_key(old.title), song_key(fixed.title)):
+                        updated.append(SongWish(fixed.artist, fixed.title))
+                        break
+        return tuple(updated)
+    songs = update_wishes(plan.songs)
+    if plan.songs and not songs:
+        raise RequestValidationError('Keine gültigen Ergänzungen zur Referenz übrig; bitte die Anfrage erneut senden.')
+    return replace(plan, artists=artists, songs=songs, artist_hints=update_wishes(plan.artist_hints),
+                   reference_songs=tuple(references)), evidence
 
 
 def repeat_policy_from_text(text):
@@ -189,6 +319,8 @@ def preserve_refinement_selection(plan, previous, user_text):
     """Mood/filter refinements inherit the selection rule in both directions."""
     if plan.kind != 'discovery':
         return plan
+    if plan.reference_songs:
+        return plan  # A similarity pool must never expand to unrelated full catalogs.
     text = user_text.casefold()
     if re.search(r'\b(no|not|keine?|ohne)\s+(?:bekannte\s+|popular\s+)?hits?\b'
                  r'|\b(deep[ -]?cuts?|album[ -]?tracks?|b[ -]?seiten)\b'
