@@ -38,6 +38,15 @@ class PlaybackTracker:
             return 'external'
         device = pb.get('device', {}).get('id')
         if not device or device != t['device_id']:
+            progress = pb.get('progress_ms')
+            if (device and self.control and pb['item'].get('uri') == t['uri']
+                    and (pb.get('context') or {}).get('uri') == t['album_uri']
+                    and isinstance(progress, (int, float)) and 0 <= progress <= t['duration']):
+                # Follow an observed transfer, never infer listened time across it.
+                self.gap()
+                t.update(device_id=device, progress_ms=progress, sampled_at=now,
+                         playing=bool(pb.get('is_playing')))
+                return 'transferred'
             self.control = False
             return 'manual'
         progress = pb.get('progress_ms')

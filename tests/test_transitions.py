@@ -103,7 +103,7 @@ class TransitionTests(unittest.TestCase):
         self.assertTrue(self.poll(position=199000, now=204))
 
     def test_manual_track_or_device_change_discards_preparation(self):
-        for kwargs in (dict(name='Manual', album='spotify:album:Other'), dict(device='phone')):
+        for kwargs in (dict(name='Manual', album='spotify:album:Other'), dict(device='phone', name='Manual')):
             with self.subTest(kwargs=kwargs):
                 dj.tracker.control = True
                 dj.now_playing.update(confirmed=True, judged=False, preparation_attempted=False)
@@ -113,6 +113,19 @@ class TransitionTests(unittest.TestCase):
                 self.assertFalse(dj.tracker.control)
         self.spotify.start_playback.assert_not_called()
         dj.save_memory.assert_not_called()
+
+    def test_same_track_transfer_discards_old_preparation_and_follows_device(self):
+        dj.prepare_next_track()
+        self.assertFalse(self.poll(position=195000, now=195, device='phone'))
+        self.assertTrue(dj.tracker.control)
+        self.assertIsNone(dj._prepared_next)
+        self.assertEqual(dj.now_playing['device_id'], 'phone')
+        self.spotify.start_playback.assert_not_called()
+        self.assertFalse(self.poll(position=196000, now=196, device='phone'))
+        self.assertTrue(self.poll(position=199000, now=199, device='phone'))
+        self.spotify.current_playback.return_value = playback(0, name='Next', device='phone')
+        dj.advance_to_next_track()
+        self.assertEqual(self.spotify.start_playback.call_args.kwargs['device_id'], 'phone')
 
     def test_seek_near_end_does_not_trigger_early_switch(self):
         dj.now_playing.update(progress_ms=10000, sampled_at=10, listened_ms=5000)

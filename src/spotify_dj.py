@@ -822,7 +822,10 @@ class DeviceUnavailable(Exception):
 def get_active_device_id():
     devices = sp.devices().get("devices", [])
     preferred = os.getenv("SPOTIFY_DEVICE_NAME", "").strip()
-    if preferred:
+    active = [d for d in devices if d.get('is_active')]
+    if active:
+        chosen = next((d for d in active if d.get('id') and not d.get('is_restricted')), None)
+    elif preferred and not now_playing.get('device_id'):
         chosen = next((d for d in devices if d.get("name", "").casefold() == preferred.casefold()
                        and not d.get("is_restricted")), None)
     else:
@@ -1695,7 +1698,11 @@ def track_finished(allow_early=False):
         now_playing["confirmed"] = False
         publish_progress(None)
         return True
-    if event == "manual":
+    if event == 'transferred':
+        _prepared_next = None
+        now_playing['preparation_attempted'] = False
+        status('Spotify-Gerätewechsel erkannt; DJ folgt dem aktiven Gerät')
+    elif event == "manual":
         _prepared_next = None
         judge_last_track(mode_switch=True)
         now_playing["confirmed"] = False

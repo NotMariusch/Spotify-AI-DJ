@@ -95,7 +95,20 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(self.t.control)
 
     def test_device_change(self):
-        self.assertEqual(self.t.observe(playback(5000, device='phone'), 5), 'manual')
+        self.assertEqual(self.t.observe(playback(5000, device='phone'), 5), 'transferred')
+        self.assertTrue(self.t.control)
+        self.assertEqual(self.t.track['device_id'], 'phone')
+        self.assertEqual(self.t.track['listened_ms'], 0)
+        self.assertIsNone(self.t.verdict(interrupted=True))
+
+    def test_device_and_song_change_releases_control(self):
+        self.assertEqual(self.t.observe(playback(0, uri='spotify:track:manual', device='phone'), 5), 'manual')
+        self.assertFalse(self.t.control)
+
+    def test_paused_device_transfer_remains_paused(self):
+        self.assertEqual(self.t.observe(playback(5000, device='phone', playing=False), 5), 'transferred')
+        self.assertFalse(self.t.track['playing'])
+        self.assertFalse(self.t.can_finish_early(5))
 
     def test_ai_never_judged(self):
         self.t.track['is_ai_play'] = True
@@ -191,12 +204,29 @@ class IntegrationTests(unittest.TestCase):
             dj.safe_play(context_uri='spotify:album:album', offset={'uri': 'spotify:track:old'})
         dj.sp.start_playback.assert_not_called()
 
-    def test_preferred_device_missing_does_not_use_active_phone(self):
+    def test_active_device_takes_priority_over_preferred_pc(self):
+        for name in ('iPhone', 'Echo'):
+            dj.sp.devices.return_value = {'devices': [dict(id='pc', name='MOROR', is_active=False),
+                                                     dict(id='remote', name=name, is_active=True)]}
+            with patch.dict(os.environ, {'SPOTIFY_DEVICE_NAME': 'MOROR'}):
+                self.assertEqual(dj.get_active_device_id(), 'remote')
+
+    def test_restricted_active_device_does_not_silently_transfer_to_pc(self):
+        dj.sp.devices.return_value = {'devices': [dict(id='pc', name='MOROR', is_active=False),
+                                                 dict(id='remote', name='Echo', is_active=True, is_restricted=True)]}
+        with patch.dict(os.environ, {'SPOTIFY_DEVICE_NAME': 'MOROR'}):
+            with self.assertRaises(dj.DeviceUnavailable):
+                dj.get_active_device_id()
+
+    def test_disappeared_active_device_does_not_fallback_to_preferred_pc(self):
+        dj.now_playing['device_id'] = 'phone'
+        dj.sp.devices.return_value = {'devices': [dict(id='pc', name='MOROR', is_active=False)]}
         with patch.dict(os.environ, {'SPOTIFY_DEVICE_NAME': 'MOROR'}):
             with self.assertRaises(dj.DeviceUnavailable):
                 dj.get_active_device_id()
 
     def test_preferred_device_name_case_insensitive(self):
+        dj.sp.devices.return_value['devices'][0]['is_active'] = False
         with patch.dict(os.environ, {'SPOTIFY_DEVICE_NAME': 'pc'}):
             self.assertEqual(dj.get_active_device_id(), 'pc')
 

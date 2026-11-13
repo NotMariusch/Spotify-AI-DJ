@@ -196,6 +196,17 @@ You: 3        ← switches to K-Pop mode
 
 ## AI Voice Mode
 
+### Spotify-Gerätewechsel
+
+Ein aktives, steuerbares Spotify-Gerät hat Vorrang vor `SPOTIFY_DEVICE_NAME`.
+Das konfigurierte Gerät dient nur beim ersten Start ohne aktives Gerät als
+Fallback. Verschwindet ein Gerät später, wartet der DJ, statt auf den PC
+zurückzuschalten. Überträgst du denselben Song im selben Album-Kontext auf
+Handy oder Alexa, folgt der DJ dem bestätigten Wechsel. Die Übertragung zählt
+nicht als gehörte Zeit und verursacht keine negative Bewertung. Ein anderer
+manuell gestarteter Song gibt die DJ-Steuerung weiterhin frei. Als eingeschränkt
+gemeldete Geräte werden nicht durch einen stillen Wechsel auf den PC umgangen.
+
 ### Referenzsongs und musikalische Eigenschaften
 
 Textwünsche funktionieren auf Deutsch, Englisch und gemischt. „Spiel X“ bleibt
