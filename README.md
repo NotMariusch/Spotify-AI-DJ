@@ -150,7 +150,7 @@ Das sind vier begrenzte Leseanfragen, keine vollständige lebenslange Hörhistor
 Kurzfristige Top-Songs werden stärker gewichtet, längerfristige Favoriten und
 kürzlich gehörte Songs ergänzen sie. Der DJ bevorzugt weniger oft in dieser Session
 gespielte Titel und wechselt Künstler, wenn geeignete Alternativen vorhanden sind.
-Kleine Pools dürfen wiederholen. Sperren und Versionsfilter gelten weiterhin.
+Über Abschnittsgrenzen hinweg dürfen kleine Pools wiederholen. Sperren und Versionsfilter gelten weiterhin.
 
 Die Auswahl bleibt im RAM. Beim erneuten Einstieg wird sie höchstens stündlich
 aktualisiert; automatische Übergänge verwenden den vorhandenen Pool. Bei einer
@@ -170,12 +170,17 @@ diese temporären AI-Markierungen nicht mehr vorhanden.
 `ANTHROPIC_API_KEY` plant Claude während der Wiedergabe jeweils einen nächsten
 Abschnitt: Favoriten aus deinen Top-Listen, zuletzt gehörte Musik oder neue
 Empfehlungen mit Bezug zu deinen Hördaten. Die KI wählt dafür eine musikalische
-Richtung und eine kurze deutsche Einleitung. Diese erscheint beim bestätigten
+Richtung. Der DJ erstellt eine passende Quellen-/Künstler-Einleitung aus der
+verifizierten Auswahl. Diese erscheint beim bestätigten
 Start des Abschnitts im Dashboard-Log; es gibt keine gesprochene Moderation.
 
-Nach vier bestätigten Songstarts beginnt der nächste Abschnitt. Ein Skip zählt
+Nach höchstens vier bestätigten Songstarts beginnt der nächste Abschnitt; ist
+die ungespielte Auswahl vorher erschöpft, wechselt der DJ früher. Ein Skip zählt
 als neuer Start; eine Pause oder ein fehlgeschlagener Start nicht. Künstler und
 Songs rotieren innerhalb der Auswahl, soweit die Kandidatenmenge es erlaubt.
+Innerhalb eines Abschnitts wird ein Titel nicht wiederholt, auch nicht allein
+für einen Künstlerwechsel. Gleiche ISRCs werden dabei als dieselbe Aufnahme
+behandelt. Ohne vorbereiteten Folgeabschnitt geht der lokale Mix weiter.
 Entdeckungen müssen auf Spotify aufgelöst werden und durch die normalen Filter
 passen. „Neu“ bedeutet hier außerhalb des geladenen Hördaten-Ausschnitts, nicht
 nachweislich noch nie gehört. Musikalische Nähe ist eine KI-Einschätzung anhand
@@ -191,6 +196,18 @@ zusätzliche Spotify-Suchen. Dabei entstehen laufende Claude-Nutzungskosten.
 Es läuft höchstens eine Planung gleichzeitig. Bei Fehlern gelten begrenzte
 Wiederholungen mit Wartezeit und Rate-Limit-Beachtung; der lokale Mix bleibt
 verfügbar. Ohne KI-Ergebnis wechseln lokale Favoriten-/Verlaufsabschnitte weiter.
+Einleitungen und Abschnittstitel nennen die bestätigte Quelle und tatsächlich
+verfügbaren Künstler. Die KI bestimmt weiterhin die musikalische Auswahl, ihre
+freien Ankündigungen werden jedoch nicht als überprüfte Tatsachen angezeigt.
+Einzelne Vorschläge aus der falschen Quelle (Top-Liste statt jüngster Verlauf
+oder umgekehrt) werden mit Hinweis ausgelassen; passende Vorschläge bleiben
+ohne weiteren KI-Aufruf erhalten. Völlig unbekannte Titel in solchen Abschnitten
+werden weiterhin abgelehnt. Die Anfrage enthält explizite zulässige Quellenindizes.
+Validierungsfehler nennen den konkreten Grund; der nächste reguläre Versuch
+erhält ihn als Korrekturhinweis. Zu lange Einleitungen werden lokal gekürzt,
+ohne dafür erneut Claude aufzurufen. Nach sechs erfolglosen Versuchen stoppt
+die automatische Planung bis zur erneuten Auswahl von Standard; die Meldung
+weist ausdrücklich darauf hin. Ein erfolgreicher Abschnitt setzt den Fehlerzähler zurück.
 Ein anderer Modus oder eine neue AI-Anfrage verwirft ausstehende Planungen.
 Die Auswahl bleibt temporär und erzeugt keine dauerhaften Geschmackspräferenzen.
 
@@ -335,6 +352,8 @@ Spotify kann diese Wiedergaben dennoch in seine eigenen Top-Listen aufnehmen.
   musikalische Vergleich 90. Kein automatisches Wiederholen derselben Timeout-Anfrage;
   Hintergrund-Nachladen hat seine eigenen begrenzten Versuche mit Backoff.
 - **Start nicht bestätigt:** Der Status nennt die zuletzt fehlende Bestätigung.
+  Eine zusätzliche Startdiagnose zeigt angeforderten und gemeldeten Titel samt
+  Track-URI, Album-Kontext und Gerät; es werden keine zusätzlichen API-Abfragen ausgelöst.
   Spotify prüfen und anschließend einen DJ-Befehl senden; keine Reauthentifizierung auf Verdacht.
 - **AI wartet auf Antwort:** Wunsch konkretisieren. Ein unveränderter Prompt beseitigt
   keine fehlende Künstlerzuordnung oder tatsächlich mehrdeutige Aufnahme.

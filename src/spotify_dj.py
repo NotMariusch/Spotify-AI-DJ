@@ -430,7 +430,7 @@ sp = None
 DEBUG_MODE = os.getenv("DJ_DEBUG", "0") == "1"
 
 
-def safe_play(_device_id=None, **kwargs):
+def safe_play(_device_id=None, _expected_title=None, **kwargs):
     """Request once, then confirm the exact track and device in four polls."""
     if DEBUG_MODE:
         status("Debug: kein Playback angefordert")
@@ -444,10 +444,12 @@ def safe_play(_device_id=None, **kwargs):
     publish_progress(None)
     sp.start_playback(device_id=device_id, **kwargs)
     confirmation_problem = 'keine Playback-Daten'
+    last_pb = None
     for delay in (1, 2, 2, 3):
         time.sleep(delay)
         try:
             pb = sp.current_playback()
+            last_pb = pb
         except RateLimitError:
             raise
         except Exception as error:
@@ -472,6 +474,15 @@ def safe_play(_device_id=None, **kwargs):
             confirmation_problem = 'Album-Kontext nicht bestätigt'
         else:
             confirmation_problem = 'Startposition nicht bestätigt'
+    def readable(value):
+        return ' '.join(str(value or '—').split())[:240]
+    item = (last_pb or {}).get('item') or {}
+    actual = ', '.join(a.get('name', '') for a in item.get('artists', []))
+    print('  Startdiagnose: angefordert=' + readable(_expected_title or expected_uri)
+          + ' [' + readable(expected_uri) + ']; Spotify=' + readable(actual + ' — ' + item.get('name', 'kein Titel'))
+          + ' [' + readable(item.get('uri')) + ']; linked_from=' + readable((item.get('linked_from') or {}).get('uri'))
+          + '; Album Soll/Ist=' + readable(kwargs['context_uri']) + ' / ' + readable(((last_pb or {}).get('context') or {}).get('uri'))
+          + '; Gerät Soll/Ist=' + readable(device_id) + ' / ' + readable(((last_pb or {}).get('device') or {}).get('id')))
     status(f"Start nicht bestätigt nach 4 Prüfungen: {confirmation_problem}; neuer DJ-Befehl erforderlich")
     return None
 
@@ -645,6 +656,7 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
     _prepared_next = None
     pb = safe_play(
         _device_id=device_id,
+        _expected_title=f"{name} — {chosen['name']}",
         context_uri=chosen["album"]["uri"],
         offset={"uri": chosen["uri"]}, position_ms=0,
     )
@@ -1031,13 +1043,20 @@ def service_personal_director():
             if not isinstance(error, Cancelled):
                 wait = max(0, math.ceil(jobs.due - time.monotonic()))
                 detail = 'Rate-Limit' if hasattr(error, 'retry_after') else type(error).__name__
+                if isinstance(error, RequestValidationError):
+                    detail = str(error)
+                    personal_director.validation_feedback = detail
+                exhausted = jobs.attempts >= jobs.MAX_ATTEMPTS
+                next_step = ('Automatische Planung beendet; Standard erneut wählen für neue Versuche.' if exhausted
+                             else f'Frühestens in {wait}s erneut.')
                 print(f'  Standard: Blockplanung {detail}; vorhandener Mix läuft weiter. '
-                      f'Frühestens in {wait}s erneut (Versuch {jobs.attempts}/{jobs.MAX_ATTEMPTS}).')
+                      f'{next_step} (Versuch {jobs.attempts}/{jobs.MAX_ATTEMPTS}).')
         else:
             block.tracks = [t for t in block.tracks if personal_track_allowed(t)]
             if block.tracks:
                 personal_director.queued = block
                 jobs.attempts = 0
+                personal_director.validation_feedback = None
                 print(f'  Standard: nächster Abschnitt vorbereitet — {block.title} ({len(block.tracks)} Titel).')
     if (auto_mode != 'global' or not tracker.control or not now_playing.get('confirmed')
             or not now_playing.get('playing') or personal_director.queued is not None
@@ -1047,11 +1066,12 @@ def service_personal_director():
     snapshot = copy.deepcopy(personal_mix)
     snapshot.tracks = [t for t in snapshot.tracks if personal_track_allowed(t)]
     history, recent = list(personal_director.history), list(personal_director.recent)
+    feedback = personal_director.validation_feedback
     def job(cancelled):
+        print('  Standard: KI plant den nächsten Musikabschnitt im Hintergrund.', flush=True)
         return plan_personal_block(snapshot, history, recent, connect,
-            lambda ts: select_best_tracks(ts, allow_compilations=True), cancelled)
-    if jobs.start(job, 0):
-        print('  Standard: KI plant den nächsten Musikabschnitt im Hintergrund.')
+            lambda ts: select_best_tracks(ts, allow_compilations=True), cancelled, feedback)
+    jobs.start(job, 0)
 
 
 def service_ai_refill():

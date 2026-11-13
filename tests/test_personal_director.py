@@ -28,8 +28,135 @@ def response(kind='recent', artist='B', title='Recent'):
 
 
 class PersonalDirectorTests(unittest.TestCase):
+    def test_two_song_block_moves_on_without_filling_four_starts(self):
+        p, d = pool(), director.PersonalDirector()
+        d.queued = director.MusicBlock('discovery', 'Short', 'Short', [track('Bones', 'A'), track('Patrick', 'B')])
+        first = d.choose(p, lambda _: True)
+        d.confirm(first)
+        d.queued = director.MusicBlock('recent', 'Next', 'Next', [track('Next', 'C')])
+        second = d.choose(p, lambda _: True)
+        self.assertNotEqual(identity(first), identity(second))
+        d.confirm(second)
+        self.assertEqual(d.choose(p, lambda _: True)['name'], 'Next')
+
+    def test_artist_rotation_cannot_repeat_song_before_unplayed_alternatives(self):
+        p, d = pool(), director.PersonalDirector()
+        songs = [track('Phoenix', 'Fall Out Boy')] + [track(str(i), 'Ado') for i in range(4)]
+        d.queued = director.MusicBlock('recent', 'Mix', 'Mix', songs)
+        played = []
+        for _ in range(4):
+            chosen = d.choose(p, lambda _: True)
+            played.append(identity(chosen))
+            d.confirm(chosen)
+            p.record_start(chosen)
+        self.assertEqual(len(set(played)), 4)
+
+    def test_same_recording_on_other_album_is_not_repeated(self):
+        p, d = pool(), director.PersonalDirector()
+        songs = [dict(track('One'), external_ids={'isrc': 'USABC0000001'}),
+                 dict(track('Another title'), external_ids={'isrc': 'USABC0000001'})]
+        d.queued = director.MusicBlock('discovery', 'Copies', 'Copies', songs)
+        d.confirm(d.choose(p, lambda _: True))
+        d.queued = director.MusicBlock('recent', 'Next', 'Next', [track('Next')])
+        self.assertEqual(d.choose(p, lambda _: True)['name'], 'Next')
+
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-only'})
+    def test_wrong_source_song_is_removed_without_new_model_call_or_false_intro(self):
+        data = response()
+        data['title'], data['intro'] = 'Nur A', 'Jetzt ausschließlich A.'
+        data['songs'].append(dict(artist='A', title='Top', based_on=0, reason='Fits'))
+        with patch.object(director, '_request_model', return_value=data) as model:
+            block = director.plan_personal_block(pool(), [], [], Mock(), lambda ts: ts, threading.Event())
+        model.assert_called_once()
+        self.assertEqual([t['name'] for t in block.tracks], ['Recent'])
+        self.assertEqual(block.title, 'Zuletzt bei dir: B')
+        self.assertNotIn('ausschließlich', block.intro)
+        payload = json.loads(model.call_args.args[0])
+        self.assertEqual(json.loads(payload['messages'][0]['content'])['eligible_source_indices']['recent'], [1])
+
+    def test_grounded_announcement_refreshes_after_ban_and_waits_for_confirmation(self):
+        p, d = pool(), director.PersonalDirector()
+        d.queued = director.MusicBlock('discovery', 'Stale', 'Stale',
+                                      [track('One', 'A'), track('Two', 'B')], grounded=True)
+        chosen = d.choose(p, lambda t: t['artists'][0]['name'] == 'B')
+        self.assertIsNone(d.active)
+        self.assertEqual(d.queued.heard, set())
+        title, intro = d.confirm(chosen)
+        self.assertEqual(title, 'Entdeckungen: B')
+        self.assertIn('mit B.', intro)
+
+    def test_long_presentation_text_is_shortened_without_losing_music(self):
+        data = response()
+        data['title'], data['intro'] = 'T' * 90, 'I' * 300
+        data['songs'][0]['reason'] = 'R' * 200
+        _, title, intro, songs = director.validate_block(data, director.history_snapshot(pool()), ['recent'], [])
+        self.assertEqual((len(title), len(intro), len(songs)), (70, 220, 1))
+
+    def test_validation_explains_source_and_index_errors(self):
+        evidence = director.history_snapshot(pool())
+        with self.assertRaisesRegex(director.RequestValidationError, 'gewählten Quelle'):
+            director.validate_block(response('favorites'), evidence, ['favorites'], [])
+        data = response()
+        data['songs'][0]['based_on'] = True
+        with self.assertRaisesRegex(director.RequestValidationError, 'Index von 0 bis 1'):
+            director.validate_block(data, evidence, ['recent'], [])
+
+    def test_excess_artists_are_limited_without_discarding_valid_songs(self):
+        data = response('discovery')
+        data['songs'] = [dict(artist=f'New{i}', title=f'Song{i}', based_on=0, reason='Ähnliche Energie') for i in range(6)]
+        result = director.validate_block(data, director.history_snapshot(pool()), ['discovery'], [])
+        self.assertEqual(len(result[3]), 4)
+
+    def test_snapshot_retains_sources_beyond_source_sampling_cutoff(self):
+        p = pool()
+        extra = [track(str(i), 'C') for i in range(15)]
+        p.tracks = extra + p.tracks
+        p.sources['recent'] = {identity(t) for t in p.tracks}
+        snapshot = director.history_snapshot(p)
+        top = next(t for t in snapshot if t['title'] == 'Top')
+        self.assertIn('recent', top['sources'])
+
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-only'})
+    def test_next_attempt_receives_feedback_without_an_extra_model_call(self):
+        with patch.object(director, '_request_model', return_value=response()) as model:
+            director.plan_personal_block(pool(), [], [], Mock(), lambda ts: ts,
+                                        threading.Event(), 'Song 1: Quelle falsch.')
+        model.assert_called_once()
+        payload = json.loads(model.call_args.args[0])
+        context = json.loads(payload['messages'][0]['content'])
+        self.assertEqual(context['previous_validation_error'], 'Song 1: Quelle falsch.')
+
+    def test_exhaustion_reports_no_further_automatic_attempt(self):
+        d = director.PersonalDirector()
+        d.jobs.attempts = d.jobs.MAX_ATTEMPTS
+        d.jobs.results.put((d.jobs.generation, None, director.RequestValidationError('Song 1: Quelle falsch.')))
+        with patch.object(dj, 'personal_director', d), patch.object(dj, 'auto_mode', 'global'), \
+                patch.dict(os.environ, {'ANTHROPIC_API_KEY': ''}), contextlib.redirect_stdout(io.StringIO()) as output:
+            dj.service_personal_director()
+        self.assertIn('Song 1: Quelle falsch.', output.getvalue())
+        self.assertIn('Automatische Planung beendet', output.getvalue())
+        self.assertNotIn('Frühestens', output.getvalue())
+        self.assertFalse(d.jobs.can_start(0, now=float('inf')))
+
+    def test_start_failure_reports_expected_and_actual_without_extra_requests(self):
+        sp = Mock()
+        sp.current_playback.return_value = dict(item=track('Wrong', 'Other'), is_playing=True,
+                                               device=dict(id='pc'), context=dict(uri='spotify:album:Album'), progress_ms=0)
+        with patch.object(dj, 'sp', sp), patch.object(dj, 'DEBUG_MODE', False), \
+                patch.object(dj.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+            result = dj.safe_play(_device_id='pc', _expected_title='Artist — Wanted',
+                                 context_uri='spotify:album:Album', offset={'uri': 'spotify:track:Wanted'}, position_ms=0)
+        self.assertIsNone(result)
+        self.assertIn('Artist — Wanted', output.getvalue())
+        self.assertIn('Other — Wrong', output.getvalue())
+        self.assertEqual(sp.current_playback.call_count, 4)
+        sp.start_playback.assert_called_once_with(device_id='pc', context_uri='spotify:album:Album',
+                                                offset={'uri': 'spotify:track:Wanted'}, position_ms=0)
+
     def test_blocks_change_only_after_confirmed_starts(self):
         p, d = pool(), director.PersonalDirector()
+        p.tracks = [track(str(i), 'A') for i in range(4)]
+        p.sources = {'short_term': {identity(t) for t in p.tracks}}
         first = d.choose(p, lambda _: True)
         self.assertIsNone(d.active)  # Request/failure is not playback.
         self.assertIsNone(d.confirm(track('Wrong')))
@@ -39,7 +166,7 @@ class PersonalDirectorTests(unittest.TestCase):
         d.queued = director.MusicBlock('discovery', 'Neues', 'Entdecken wir Musik.', [track('New', 'C')])
         for _ in range(3):
             chosen = d.choose(p, lambda _: True)
-            self.assertEqual(chosen, first)
+            self.assertFalse(director.recording_keys(chosen) & d.active.heard)
             self.assertIsNone(d.confirm(chosen))
         chosen = d.choose(p, lambda _: True)
         self.assertEqual(chosen['name'], 'New')
