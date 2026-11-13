@@ -22,6 +22,8 @@ from music_request import RequestValidationError, SongWish, ReferenceSong, const
 from similarity_selection import select_similar_songs
 from ai_request import _repeat_rule_only
 from background_pool import BackgroundPool, CancellableSpotify, Cancelled
+from personal_mix import PersonalMix, HistoryPermissionRequired, require_history_permissions, identity as personal_identity
+from personal_director import PersonalDirector, plan_personal_block
 
 # =====================
 # SPOTIFY CONFIG
@@ -66,6 +68,9 @@ ai_request_plan = None
 ai_request_tracks_ready = False
 ai_refill = BackgroundPool()
 ai_refill_seen = set()
+personal_mix = PersonalMix()
+personal_director = PersonalDirector()
+ai_history_exclusions = set()
 ai_song_queue = []  # Explicit wishes only; consume after confirmed playback.
 ai_song_cycle = ()  # Validated ordered requests; repeats never add other songs.
 ai_song_resolutions = {}  # Resume bounded lookups after a cooldown; request-local only.
@@ -531,7 +536,7 @@ def update_weight(artist, mode, delta):
             queue_discovery(artist, mode)
 
 def judge_last_track(interrupted=False, mode_switch=False, banned=False):
-    verdict = tracker.verdict(interrupted=interrupted, neutral=mode_switch or banned)
+    verdict = tracker.verdict(interrupted=interrupted, neutral=mode_switch or banned or now_playing.get('mode') == 'global')
     if verdict:
         artist, mode = now_playing["artist"], now_playing["mode"]
         update_weight(artist, mode, WEIGHT_BOOST if verdict == "positive" else WEIGHT_PUNISH)
@@ -804,10 +809,16 @@ class SpotifyGateway:
 
 
 def connect():
+    from spotipy.cache_handler import CacheFileHandler
+    cache = CacheFileHandler(cache_path=os.path.join(BASE_DIR, '.cache-dj'))
+    saved = cache.get_cached_token() or {}
+    # Spotipy stamps its configured scopes onto refreshed tokens. Retain
+    # already granted scopes so a normal playback refresh cannot erase history access.
+    scopes = ' '.join(sorted(set(SCOPE.split()) | set((saved.get('scope') or '').split())))
     auth_manager = SpotifyOAuth(
         client_id=CLIENT_ID, client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI, scope=SCOPE, open_browser=False,
-        cache_path=os.path.join(BASE_DIR, ".cache-dj"),
+        redirect_uri=REDIRECT_URI, scope=scopes, open_browser=False,
+        cache_handler=cache,
     )
     return SpotifyGateway(spotipy.Spotify(
         auth_manager=auth_manager, retries=0, status_retries=0,
@@ -1079,6 +1090,8 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
     tracker.start(name, mode, chosen, pb, time.monotonic(), ai=no_judge,
                   trial=name in discovered_artists and not discovered_artists[name].get("graduated", False))
     if no_judge:
+        if len(ai_history_exclusions) < 2000:
+            ai_history_exclusions.add(personal_identity(chosen))
         ai_recent_titles.append(normalize_title(chosen["name"]))
         ai_artist_plays[name] = ai_artist_plays.get(name, 0) + 1
         ai_last_artist = name
@@ -1086,6 +1099,12 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
             ai_song_queue.extend(ai_song_cycle)
         if ai_song_queue and ai_song_queue[0][1]["uri"] == chosen["uri"]:
             ai_song_queue.pop(0)
+    elif mode == 'global':
+        personal_mix.record_start(chosen)
+        announcement = personal_director.confirm(chosen)
+        if announcement:
+            log_section('Für mich: ' + announcement[0])
+            print(announcement[1])
     else:
         recent_titles.append(normalize_title(chosen["name"]))
         recent_artists.append(name)
@@ -1101,7 +1120,7 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
     print("IS_PLAYING:true")
     publish_progress(pb)
     status("DJ aktiv")
-    if not no_judge:
+    if not no_judge and mode != 'global':
         # Discovery must not delay the outgoing song's critical end window.
         run_pending_discoveries()
     return True
@@ -1287,15 +1306,61 @@ def play_from_pool(pool, mode, interrupted=True, mode_switch=False, banned=False
     play_artist(weighted_choice(pool, mode), mode, pool, interrupted=interrupted, mode_switch=mode_switch, banned=banned)
 
 def play_global_mix(interrupted=True, mode_switch=False, banned=False):
-    artist = weighted_choice(GLOBAL_POOL, "global")
-    play_artist(artist, "global", GLOBAL_POOL, interrupted=interrupted, mode_switch=mode_switch, banned=banned)
+    global _prepared_next, _pending_selection, _next_device_check
+    _prepared_next = None
+    _pending_selection = None
+    if interrupted and not mode_switch and tracker.control:
+        track_finished()
+    judge_last_track(interrupted=interrupted, mode_switch=mode_switch, banned=banned)
+    tracker.control = False
+    if now_playing:
+        now_playing['confirmed'] = False
+    if mode_switch:
+        log_section('Modus: Für mich')
+    print('MODE:global')
+    try:
+        require_history_permissions(sp.client)
+        try:
+            if personal_mix.load(sp, lambda ts: select_best_tracks(ts, allow_compilations=True), ai_history_exclusions):
+                print(f'  Für mich: {len(personal_mix.tracks)} Titel aus Hörverlauf und Spotify-Top-Songs geladen.')
+        except Exception as error:
+            if not personal_mix.tracks:
+                raise
+            personal_mix.refresh_after = time.monotonic() + max(60, getattr(error, 'retry_after', 0) or 0)
+            print('  Für mich: Aktualisierung fehlgeschlagen; vorhandene Session-Auswahl bleibt erhalten.')
+        chosen = personal_director.choose(personal_mix, personal_track_allowed)
+        if chosen is None:
+            status('Für mich: keine passenden Titel in deinen Spotify-Hördaten; bitte anderen Modus wählen')
+            return False
+        name = chosen['artists'][0]['name']
+        try:
+            return start_selected(name, 'global', chosen, False)
+        except DeviceUnavailable:
+            _pending_selection = (name, 'global', chosen, False)
+            _next_device_check = time.monotonic() + 15
+            status('Für mich: warte auf ein aktives Spotify-Gerät')
+    except HistoryPermissionRequired:
+        status('Für mich braucht Spotify-Leserechte. Einmal scripts/authorize_history.py mit der Projekt-Python-Umgebung starten; andere Modi bleiben verfügbar.')
+    except RateLimitError as error:
+        status(f'Für mich: Spotify Rate-Limit; {math.ceil(error.retry_after)}s warten und Modus erneut wählen')
+    except Exception as error:
+        if getattr(error, 'http_status', None) == 403:
+            status('Für mich: Spotify verweigert den Zugriff; Leserechte und App-Zugriff prüfen')
+        else:
+            status(f'Für mich konnte nicht starten ({type(error).__name__}); erneut versuchen')
+    return False
+
+
+def personal_track_allowed(track):
+    return (track.get('id') not in banned_track_ids
+            and not ({a.get('name') for a in track.get('artists', [])} & banned_artist_names))
 
 
 def active_request():
     if auto_mode == "ai":
         return "ai", tuple(n for n, _ in ai_pool), True
     if auto_mode == "global":
-        return "global", tuple(GLOBAL_POOL), False
+        return "global", ('personal',), False
     return auto_mode, tuple(current_pool or ()), False
 
 
@@ -1397,6 +1462,39 @@ def prepare_reference_selection(interpreted, user_request):
     print(f'  AI: {len(verified)} Referenzsongs auf Spotify bestätigt; musikalischer Vergleich folgt.')
     selected = select_similar_songs(replace(interpreted, songs=()), user_request, ai_session.context())
     return selected, evidence
+
+
+def service_personal_director():
+    """Prepare one next block without blocking playback or changing learning."""
+    jobs = personal_director.jobs
+    result = jobs.poll()
+    if result is not None and auto_mode == 'global':
+        block, error = result
+        if error is not None:
+            if not isinstance(error, Cancelled):
+                wait = max(0, math.ceil(jobs.due - time.monotonic()))
+                detail = 'Rate-Limit' if hasattr(error, 'retry_after') else type(error).__name__
+                print(f'  Für mich: Blockplanung {detail}; vorhandener Mix läuft weiter. '
+                      f'Frühestens in {wait}s erneut (Versuch {jobs.attempts}/{jobs.MAX_ATTEMPTS}).')
+        else:
+            block.tracks = [t for t in block.tracks if personal_track_allowed(t)]
+            if block.tracks:
+                personal_director.queued = block
+                jobs.attempts = 0
+                print(f'  Für mich: nächster Abschnitt vorbereitet — {block.title} ({len(block.tracks)} Titel).')
+    if (auto_mode != 'global' or not tracker.control or not now_playing.get('confirmed')
+            or not now_playing.get('playing') or personal_director.queued is not None
+            or not os.environ.get('ANTHROPIC_API_KEY') or time.time() < _rate_limit_until
+            or not jobs.can_start(0)):
+        return
+    snapshot = copy.deepcopy(personal_mix)
+    snapshot.tracks = [t for t in snapshot.tracks if personal_track_allowed(t)]
+    history, recent = list(personal_director.history), list(personal_director.recent)
+    def job(cancelled):
+        return plan_personal_block(snapshot, history, recent, connect,
+            lambda ts: select_best_tracks(ts, allow_compilations=True), cancelled)
+    if jobs.start(job, 0):
+        print('  Für mich: KI plant den nächsten Musikabschnitt im Hintergrund.')
 
 
 def service_ai_refill():
@@ -1583,6 +1681,15 @@ def prepare_next_track():
     mode, pool, ai = request
     if not pool or mode != t["mode"] or ai != t["is_ai_play"]:
         return
+    if mode == 'global':
+        chosen = personal_director.choose(personal_mix, personal_track_allowed)
+        if chosen:
+            _prepared_next = dict(owner=t['generation'], request=request,
+                                  selection=(chosen['artists'][0]['name'], 'global', chosen, False), personal=True)
+        else:
+            _prepared_next = dict(owner=t['generation'], request=request, stop=True,
+                                  reason='Für mich: keine ungesperrten Titel verfügbar')
+        return
     if ai and explicit_songs_pending():
         wish = next_song_wish()
         if wish:
@@ -1626,11 +1733,12 @@ def advance_to_next_track():
             finish_song_request(now_playing["device_id"], reason)
             return
         explicit = _prepared_next.get("explicit", False)
+        personal = _prepared_next.get('personal', False)
         selection = _prepared_next["selection"]
         _prepared_next = None
         tracker.control = False
         chosen = selection[2]
-        if not track_available(selection[0], chosen, selection[3], explicit=explicit):
+        if not (personal_track_allowed(chosen) if personal else track_available(selection[0], chosen, selection[3], explicit=explicit)):
             status("Vorbereiteter Titel nicht mehr gültig; neuer DJ-Befehl erforderlich")
             return
         try:
@@ -1740,6 +1848,7 @@ def run_dj():
 
             if choice in ('quit', '1', '2', '3', '4', '5') or choice.startswith('ai:'):
                 ai_refill.reset()
+                personal_director.reset()
                 ai_refill_seen.clear()
 
             if choice == "quit":
@@ -1900,6 +2009,7 @@ def run_dj():
             advance_to_next_track()
 
         service_ai_refill()
+        service_personal_director()
 
         time.sleep(playback_poll_interval())
 

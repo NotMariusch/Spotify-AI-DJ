@@ -355,7 +355,7 @@
         <li><kbd>F13 + 2</kbd> = German Trap</li>
         <li><kbd>F13 + 3</kbd> = K-Pop</li>
         <li><kbd>F13 + 4</kbd> = J-Pop</li>
-        <li><kbd>F13 + 5</kbd> = Global</li>
+        <li><kbd>F13 + 5</kbd> = Für mich</li>
         <li><kbd>F13 + 6</kbd> = Skip</li>
         <li><kbd>F13 + 7</kbd> = Entdeckten Künstler sperren</li>
         <li><kbd>F13 + 8</kbd> = Song sperren</li>
@@ -384,7 +384,7 @@
     <button class="btn mode" id="btn-2"  onclick="sendCmd('2')">DE Trap</button>
     <button class="btn mode" id="btn-3"  onclick="sendCmd('3')">K-Pop</button>
     <button class="btn mode" id="btn-4"  onclick="sendCmd('4')">J-Pop</button>
-    <button class="btn mode" id="btn-5"  onclick="sendCmd('5')">Global</button>
+    <button class="btn mode" id="btn-5"  onclick="sendCmd('5')">Für mich</button>
   </div>
   <div class="divider"></div>
   <button class="btn skip" onclick="sendCmd('skip')">⏭ Skip</button>
@@ -398,7 +398,7 @@
 <script>
   const socket = io();
   const MAX_LINES = 300;
-  const modeMap = {"American Rap":"btn-1","German Trap":"btn-2","K-Pop":"btn-3","J-Pop":"btn-4","Global":"btn-5","AI":"btn-ai"};
+  const modeMap = {"American Rap":"btn-1","German Trap":"btn-2","K-Pop":"btn-3","J-Pop":"btn-4","Global":"btn-5","Für mich":"btn-5","AI":"btn-ai"};
 
   // Progress model: repeated websocket broadcasts are not new Spotify samples.
   function progressSampleFromState(data, previous, now) {

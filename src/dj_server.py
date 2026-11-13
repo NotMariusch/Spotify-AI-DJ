@@ -90,7 +90,7 @@ def parse_dj_line(line: str):
     if line.startswith("MODE:"):
         mode = line[len("MODE:"):]
         state["mode"] = {"american_rap": "American Rap", "german_trap": "German Trap",
-                         "kpop": "K-Pop", "jpop": "J-Pop", "global": "Global"}.get(mode, mode)
+                         "kpop": "K-Pop", "jpop": "J-Pop", "global": "Für mich"}.get(mode, mode)
     if re.search(r"AI request:", line):
         state["current_artist"] = "AI Mode"
         state["mode"] = "AI"
@@ -309,7 +309,7 @@ def handle_command(data):
     if shutdown_requested.is_set():
         return
 
-    mode_labels = {"1": "American Rap", "2": "German Trap", "3": "K-Pop", "4": "J-Pop", "5": "Global"}
+    mode_labels = {"1": "American Rap", "2": "German Trap", "3": "K-Pop", "4": "J-Pop", "5": "Für mich"}
 
     if cmd == "ai-mode":
         return  # UI-only, no action
