@@ -21,7 +21,7 @@ def main():
             print('Spotify-Freigabe unvollständig. Bestehende Anmeldung bleibt erhalten.')
             return 1
         write_json_atomic(ROOT / '.cache-dj', token)
-        print('Spotify-Hörverlauf freigegeben. DJ neu starten und „Für mich“ wählen.')
+        print('Spotify-Hörverlauf freigegeben. DJ neu starten und „Standard“ wählen.')
         return 0
     except Exception as error:
         print(f'Freigabe fehlgeschlagen ({type(error).__name__}). Bestehende Anmeldung bleibt erhalten.')

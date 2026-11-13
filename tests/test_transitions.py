@@ -35,10 +35,10 @@ class TransitionTests(unittest.TestCase):
                       ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None, ai_session=dj.AISession(),
                       ai_request_plan=None, ai_request_tracks_ready=False, ai_song_queue=[], ai_song_cycle=(), ai_song_resolutions={},
                       artist_cache={'Artist': [track('Next')]}, track_disk_cache={},
-                      memory=dj.default_memory(), banned_track_ids=set(), banned_artist_names=set())
+                      banned_track_ids=set(), banned_artist_names=set())
         for name, value in values.items():
             self.stack.enter_context(patch.object(dj, name, value))
-        for name in ('save_memory', 'save_recent', 'record_trial_play', 'run_pending_discoveries'):
+        for name in ('write_json_atomic',):
             self.stack.enter_context(patch.object(dj, name))
         self.stack.enter_context(patch.object(dj.time, 'sleep'))
         self.spotify = self.stack.enter_context(patch.object(dj, 'sp', Mock()))
@@ -60,8 +60,7 @@ class TransitionTests(unittest.TestCase):
             self.assertTrue(self.poll())
             self.assertFalse(dj.track_finished(allow_early=True))
             fetch.assert_not_called()
-        self.assertEqual(dj.memory['modes']['jpop']['Artist'], 1.15)
-        dj.save_memory.assert_called_once()
+        dj.write_json_atomic.assert_not_called()
         self.spotify.current_playback.return_value = playback(0, name='Next')
         dj.advance_to_next_track()
         self.spotify.devices.assert_not_called()
@@ -69,7 +68,7 @@ class TransitionTests(unittest.TestCase):
             device_id='pc', context_uri='spotify:album:Album',
             offset={'uri': 'spotify:track:Next'}, position_ms=0)
         self.assertEqual(dj.now_playing['uri'], 'spotify:track:Next')
-        self.assertEqual(dj.recent_titles, ['next'])
+        self.assertEqual(dj.recent_titles, [])
 
     def test_preparation_does_not_touch_recents_learning_or_playback(self):
         with patch.object(dj, 'get_artist_tracks') as fetch:
@@ -78,13 +77,13 @@ class TransitionTests(unittest.TestCase):
             fetch.assert_not_called()
         self.assertTrue(dj.prepared_next_is_current())
         self.assertEqual(dj.recent_titles, [])
-        dj.save_recent.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.assertEqual(self.spotify.mock_calls, [])
 
     def test_does_not_switch_while_paused_near_end(self):
         self.assertFalse(self.poll(playing=False))
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.spotify.start_playback.assert_not_called()
 
     def test_does_not_cut_more_than_the_agreed_end_window(self):
@@ -112,7 +111,7 @@ class TransitionTests(unittest.TestCase):
                 self.assertIsNone(dj._prepared_next)
                 self.assertFalse(dj.tracker.control)
         self.spotify.start_playback.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_same_track_transfer_discards_old_preparation_and_follows_device(self):
         dj.prepare_next_track()
@@ -131,12 +130,12 @@ class TransitionTests(unittest.TestCase):
         dj.now_playing.update(progress_ms=10000, sampled_at=10, listened_ms=5000)
         self.assertFalse(self.poll(now=15))
         self.assertIsNone(dj.now_playing['stable_since'])
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_seek_after_sufficient_listening_still_needs_stable_progress(self):
         dj.now_playing.update(progress_ms=170000, sampled_at=170)
         self.assertFalse(self.poll(now=175))
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_unknown_and_rate_limited_data_never_trigger_transition(self):
         for response in (None, dict(item=None)):
@@ -145,14 +144,14 @@ class TransitionTests(unittest.TestCase):
         self.spotify.current_playback.side_effect = dj.RateLimitError(30)
         self.assertFalse(dj.track_finished(allow_early=True))
         self.spotify.start_playback.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_no_cached_candidate_does_not_cut_track_or_fetch_catalog(self):
         dj.artist_cache.clear()
         with patch.object(dj, 'get_artist_tracks') as fetch:
             self.assertFalse(self.poll())
             fetch.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_ai_preparation_and_transition_stay_inside_request_without_learning(self):
         dj.auto_mode = 'ai'
@@ -160,16 +159,13 @@ class TransitionTests(unittest.TestCase):
         dj.current_pool = None
         dj.artist_cache = {'Ado': [], 'Eve': [track('Next')], 'Other': [track('Other')]}
         dj.now_playing.update(mode='ai', is_ai_play=True)
-        before = copy.deepcopy(dj.memory)
         self.assertTrue(self.poll())
         self.assertEqual(dj._prepared_next['selection'][0], 'Eve')
         self.spotify.current_playback.return_value = playback(0, name='Next')
         dj.advance_to_next_track()
         self.assertTrue(dj.now_playing['is_ai_play'])
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
-        dj.run_pending_discoveries.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_mode_change_invalidates_old_preparation(self):
         dj.prepare_next_track()

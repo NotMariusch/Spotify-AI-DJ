@@ -416,15 +416,14 @@ class PlaybackSessionTests(unittest.TestCase):
                       ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None,
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
                       auto_mode='ai', current_pool=None, _prepared_next=None, _pending_selection=None,
-                      memory=dj.default_memory(), artist_cache={}, track_disk_cache={},
+                      artist_cache={}, track_disk_cache={},
                       banned_track_ids=set(), banned_artist_names=set())
         for key, value in values.items():
             self.stack.enter_context(patch.object(dj, key, value))
         self.sp = self.stack.enter_context(patch.object(dj, 'sp', Mock()))
         self.sp.search.return_value = dict(tracks=dict(items=[]))
         self.stack.enter_context(patch.object(dj.time, 'sleep'))
-        for name in ('save_memory', 'save_recent', 'save_track_cache', 'save_banned', 'save_banned_artists',
-                     'run_pending_discoveries', 'record_trial_play'):
+        for name in ('write_json_atomic', 'save_track_cache', 'save_banned', 'save_banned_artists'):
             self.stack.enter_context(patch.object(dj, name))
         self.fetch = self.stack.enter_context(patch.object(dj, 'get_artist_tracks', return_value=[fixtures.song()]))
         self.start = self.stack.enter_context(patch.object(dj, 'safe_play', side_effect=self.confirm))
@@ -444,7 +443,6 @@ class PlaybackSessionTests(unittest.TestCase):
         first = fixtures.request(artist_scope='suggested')
         followup = fixtures.request(context_action='refine', artist_scope='suggested',
                                    mood='less aggressive', style='', year_start=None, year_end=None)
-        before = copy.deepcopy(dj.memory)
         with patch.object(dj, 'ask_claude', side_effect=[first, followup]) as ask, \
                 patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
             self.commands(['ai:2000s pop', 'ai:mehr davon, aber weniger aggressiv'])
@@ -453,8 +451,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(context['last_confirmed_song']['title'], 'Hit')
         self.assertEqual(dj.ai_request_plan.year_start, 2000)
         self.assertEqual(dj.ai_request_plan.mood, 'less aggressive')
-        self.assertEqual(dj.memory, before)
-        for name in ('save_memory', 'save_recent', 'save_banned', 'save_banned_artists'):
+        for name in ('write_json_atomic', 'save_banned', 'save_banned_artists'):
             getattr(dj, name).assert_not_called()
 
     def test_hype_then_no_repeats_keeps_new_mood_and_never_learns(self):
@@ -464,7 +461,6 @@ class PlaybackSessionTests(unittest.TestCase):
 
         repair = dict(songs=[dict(artist='Artist', title='HypeOne'), dict(artist='Artist', title='HypeTwo')], mood='aggressive, hype')
         dj.artist_cache['Artist'] = [fixtures.song(), fixtures.song('HypeOne'), fixtures.song('HypeTwo')]
-        before = copy.deepcopy(dj.memory)
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
                 patch.object(ai_request.urllib.request, 'urlopen', side_effect=[
                     model_response(asdict(first)), model_response(hype), model_response(repair)]) as http, \
@@ -475,10 +471,9 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(self.start.call_count, 3)
         self.assertEqual(dj.ai_request_plan.mood, 'aggressive, hype')
         self.assertTrue(dj.ai_request_plan.avoid_session_repeats)
-        self.assertEqual(dj.memory, before)
         self.assertNotEqual(self.start.call_args_list[1].kwargs['offset']['uri'], self.start.call_args_list[2].kwargs['offset']['uri'])
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_gaming_hype_refinement_keeps_free_catalog_beyond_suggested_hits(self):
         first = fixtures.request(artist_scope='suggested', style='gaming music', year_start=None, year_end=None)
@@ -486,7 +481,6 @@ class PlaybackSessionTests(unittest.TestCase):
             style='gaming music', mood='aggressive, hype', year_start=None, year_end=None,
             songs=[dict(artist='Artist', title='HypeOne'), dict(artist='Artist', title='HypeTwo')]))
         self.fetch.return_value = [fixtures.song('HypeOne'), fixtures.song('HypeTwo'), fixtures.song('DeepCut')]
-        before = copy.deepcopy(dj.memory)
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
                 patch.object(ai_request.urllib.request, 'urlopen', side_effect=[model_response(asdict(first)), model_response(hype)]) as http, \
                 patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
@@ -496,9 +490,8 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(dj.ai_request_plan.mood, 'aggressive, hype')
         self.assertEqual(dj.ai_song_queue, [])
         self.assertEqual({t['name'] for t in dj.ai_session_catalogs['Artist']}, {'HypeOne', 'HypeTwo', 'DeepCut'})
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_real_resolver_receives_identity_anchors_and_cached_catalog(self):
         plan = fixtures.request(artist_hints=[dict(artist='Artist', title='First'), dict(artist='Artist', title='Second')])
@@ -509,7 +502,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(dj.ai_pool, [('Artist', 'artist')])
         self.sp.search.assert_called_once()
         self.assertEqual(self.start.call_count, 1)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_failed_start_does_not_enter_session_history(self):
         dj.ai_request_plan = fixtures.request()
@@ -526,7 +519,6 @@ class PlaybackSessionTests(unittest.TestCase):
         dj.recent_titles.extend(['first', 'second'])
         dj.ai_recent_titles.extend(['first', 'second'])
         dj.ai_session.record_play('Artist', fixtures.song('First'))
-        before = copy.deepcopy(dj.memory)
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
         played = [dj.now_playing['uri']]
         for _ in range(5):
@@ -542,9 +534,8 @@ class PlaybackSessionTests(unittest.TestCase):
         self.sp.search.assert_not_called()
         self.fetch.assert_not_called()
         self.sp.pause_playback.assert_not_called()
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_default_explicit_song_list_loops_in_order_without_adding_music(self):
         dj.ai_request_plan = fixtures.request(kind='songs', songs=[dict(artist='Artist', title='First'),
@@ -562,8 +553,8 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(played, [fixtures.song('First')['uri'], fixtures.song('Second')['uri']] * 3)
         self.sp.search.assert_not_called()
         self.fetch.assert_not_called()
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_less_artist_is_rarer_but_remains_playable_without_learning(self):
         other = fixtures.song('OtherHit', artist='other')
@@ -572,15 +563,13 @@ class PlaybackSessionTests(unittest.TestCase):
         dj.ai_artists['Other'] = 'other'
         dj.ai_request_plan = fixtures.request(artists=['Artist', 'Other'], less_artists=['Other'])
         self.fetch.side_effect = lambda name: [fixtures.song()] if name == 'Artist' else [other]
-        before = copy.deepcopy(dj.memory)
         played = []
         for _ in range(16):
             self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True, interrupted=False))
             played.append(dj.now_playing['artist'])
         self.assertGreater(played.count('Other'), 0)
         self.assertLess(played.count('Other'), played.count('Artist'))
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_less_song_is_rarer_and_can_be_restored_without_being_banned(self):
         dj.ai_request_plan = fixtures.request(less_songs=[dict(artist='Artist', title='Reduced')])
@@ -593,7 +582,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertGreater(played.count(reduced), 0)
         self.assertLess(played.count(reduced), played.count(fixtures.song('Normal')['uri']))
         self.assertNotIn(fixtures.song('Reduced')['id'], dj.banned_track_ids)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         dj.save_banned.assert_not_called()
 
     def test_failed_new_cycle_does_not_consume_song_or_count_a_play(self):
@@ -648,7 +637,6 @@ class PlaybackSessionTests(unittest.TestCase):
         mistaken = asdict(first)
         mistaken.update(context_action='refine')
         self.fetch.return_value = [fixtures.song(), fixtures.song('DeepCut')]
-        before = copy.deepcopy(dj.memory)
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unit-test-only'}), \
                 patch.object(ai_request.urllib.request, 'urlopen', return_value=model_response(mistaken)) as http, \
                 patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]):
@@ -660,8 +648,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(len(dj.ai_session_catalogs['Artist']), 2)
         self.assertEqual(self.start.call_count, 1)
         http.assert_called_once()
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_no_repeat_filter_applies_to_start_and_prepared_transition(self):
         dj.ai_request_plan = fixtures.request(avoid_session_repeats=True)
@@ -676,7 +663,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertNotEqual(chosen['uri'], dj.now_playing['uri'])
         dj.now_playing['confirmed'] = False
         dj.advance_to_next_track()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_exclusions_remain_effective_when_pool_has_no_alternative(self):
         dj.ai_request_plan = fixtures.request(excluded_artists=['Artist'])
@@ -704,8 +691,8 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertFalse(dj.ai_session.heard)
         self.assertEqual(dj.ai_recent_titles, [])
         self.assertFalse(dj.tracker.control)
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_clarification_keeps_original_request_for_next_answer(self):
         dj.artist_cache['Artist'] = [fixtures.song()]

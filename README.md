@@ -1,7 +1,6 @@
 # Spotify AI DJ
 
-Ein persönlicher Spotify-Controller für Windows: Genre-Modi mit lokalem Lernen,
-ein „Für mich“-Mix aus deinem Spotify-Hörverhalten und spontane Musikwünsche per
+Ein persönlicher Spotify-Controller für Windows: ein „Standard“-Mix aus deinem Spotify-Hörverhalten und spontane Musikwünsche per
 Text oder Sprache. Das Dashboard läuft lokal unter **http://127.0.0.1:5001/**.
 
 Der DJ steuert die Wiedergabe auf einem Spotify-Gerät. Er streamt selbst keine
@@ -11,10 +10,10 @@ Musik und integriert nicht den offiziellen Spotify AI DJ. Hosting und eine
 ## Schnellstart für eine vorhandene Installation
 
 - `start_dj_hidden.vbs` starten: Dashboard und DJ laufen ohne Konsolenfenster.
-- Dashboard öffnen und einen Modus wählen. Beim Start wird noch keine Musik angefordert.
+- Dashboard öffnen und „Standard“ starten oder direkt einen Musikwunsch eingeben. Beim Start wird noch keine Musik angefordert.
 - Optional `scripts/dj_hotkey.ahk` mit AutoHotkey v2 starten.
 - Für Sprache zusätzlich `start_voice_hidden.vbs` starten.
-- Beenden über **Quit DJ**, **F13 + 9** oder den Terminal-Chat-Befehl `quit`.
+- Beenden über **Quit DJ**, **F13 + 5** oder den Terminal-Chat-Befehl `quit`.
 
 Zum Neustarten warten, bis das Dashboard das Beenden meldet, dann den Hidden-Launcher
 wieder ausführen. Der Voice-Client muss bei Bedarf ebenfalls neu gestartet werden.
@@ -24,20 +23,17 @@ Spotify selbst bleibt geöffnet und kann nach dem Beenden des DJs weiterspielen.
 
 | Taste / Dashboard | Funktion |
 |---|---|
-| F13 + 1 / Rap | American Rap aus dem lokalen Künstlerpool |
-| F13 + 2 / DE Trap | German Trap aus dem lokalen Künstlerpool |
-| F13 + 3 / K-Pop | K-Pop aus dem lokalen Künstlerpool |
-| F13 + 4 / J-Pop | J-Pop aus dem lokalen Künstlerpool |
-| F13 + 5 / Für mich | Persönlicher Mix aus Spotify-Hörverlauf und Top-Songs; ersetzt Global |
-| F13 + 6 / Skip | Nächster DJ-Song |
-| F13 + 7 / Ban Artist | Aktuellen entdeckten Künstler dauerhaft sperren; nicht für feste Pool-Künstler |
-| F13 + 8 / Ban Track | Aktuellen Track dauerhaft sperren |
-| F13 + 9 / Quit DJ | DJ, Dashboard-Server und laufenden Voice-Client beenden |
+| F13 + 1 / Standard | Persönlicher Mix aus Spotify-Hörverlauf und Top-Songs; ersetzt Global |
+| F13 + 2 / Skip | Nächster DJ-Song |
+| F13 + 3 / Ban Artist | Aktuellen DJ-Künstler dauerhaft sperren; unabhängig von seiner Herkunft |
+| F13 + 4 / Ban Track | Aktuellen Track dauerhaft sperren |
+| F13 + 5 / Quit DJ | DJ, Dashboard-Server und laufenden Voice-Client beenden |
 | F13 + V | Sprachaufnahme starten/stoppen; benötigt den separaten Voice-Client |
 
 Das AHK-Skript enthält `RControl::F13`. Alternativ kann rechte Strg über die
 Tastatursoftware auf F13 abgebildet werden. AHK verarbeitet die Ziffern-Hotkeys;
-der Voice-Client verarbeitet F13 + V selbst.
+der Voice-Client verarbeitet F13 + V selbst. F13 + 6 bis 9 sind nicht belegt.
+Musikwünsche werden ohne zusätzlichen Modusknopf direkt eingegeben oder gesprochen.
 
 Das Dashboard zeigt Künstler, Titel, Modus, Status und eine Fortschrittsleiste.
 Die Leiste dient nur zur Anzeige, nicht zum Spulen. Logs trennen unter anderem
@@ -70,7 +66,6 @@ SPOTIFY_CLIENT_ID=deine_client_id
 SPOTIFY_CLIENT_SECRET=dein_client_secret
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
 ANTHROPIC_API_KEY=dein_anthropic_api_key
-LASTFM_API_KEY=dein_lastfm_api_key
 DJ_VOICE_LANGUAGE=en-US
 # Optionaler Start-Fallback, kein erzwungenes Wiedergabegerät:
 # SPOTIFY_DEVICE_NAME=Mein PC
@@ -79,8 +74,7 @@ DJ_VOICE_LANGUAGE=en-US
 | Einstellung | Zweck |
 |---|---|
 | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_REDIRECT_URI` | Spotify-Anmeldung und Wiedergabesteuerung |
-| `ANTHROPIC_API_KEY` | Für AI-Anfragen und dynamische KI-Abschnitte in „Für mich“; ohne Schlüssel funktioniert dort die lokale Auswahl aus Hördaten |
-| `LASTFM_API_KEY` | Künstlerentdeckung in den lernenden Genre-Modi |
+| `ANTHROPIC_API_KEY` | Für AI-Anfragen und dynamische KI-Abschnitte in „Standard“; ohne Schlüssel funktioniert dort die lokale Auswahl aus Hördaten |
 | `SPOTIFY_DEVICE_NAME` | Optionales bevorzugtes Gerät beim ersten Start ohne aktives Gerät |
 | `DJ_VOICE_LANGUAGE` | Feste Sprache der Spracherkennung: standardmäßig `en-US`, alternativ etwa `de-DE` |
 | `DJ_DEBUG=1` | Unterdrückt echte Playback-Startanfragen; für normalen Betrieb weglassen |
@@ -91,13 +85,13 @@ Spotify-App-, Konto- und API-Berechtigungen müssen die verwendeten Endpunkte
 zulassen. Zugriffsfehler werden nicht durch automatisches Neuanmelden umgangen.
 
 Schlüssel für optionale Dienste gibt es bei
-[Anthropic](https://console.anthropic.com/) und [Last.fm](https://www.last.fm/api/account/create).
+[Anthropic](https://console.anthropic.com/).
 AI-Aufrufe verursachen nutzungsabhängige Kosten; dieses Projekt garantiert weder
 bestimmte Kosten noch eine bestimmte Anzahl Anfragen pro Guthaben.
 
 ### Spotify einmalig freigeben
 
-Für die vollständige Einrichtung einschließlich „Für mich“ den DJ zunächst
+Für die vollständige Einrichtung einschließlich „Standard“ den DJ zunächst
 beenden und dieses Skript ausführen:
 
 ```powershell
@@ -118,8 +112,8 @@ interaktiv prüfen, ohne Hörverlaufsrechte anzufordern:
 ```
 
 Falls dabei eine Anmelde-URL oder Eingabeaufforderung erscheint, der angezeigten
-Anleitung folgen. Ohne Hörverlaufsfreigabe zeigt „Für mich“ einen Hinweis; die
-anderen Modi bleiben nutzbar. Der Dashboard-Server benötigt keine eigene
+Anleitung folgen. Ohne Hörverlaufsfreigabe zeigt „Standard“ einen Hinweis; die
+Musikwünsche bleiben nutzbar. Der Dashboard-Server benötigt keine eigene
 Spotify-Anmeldung. Vorhandene zusätzliche Rechte bleiben beim Token-Refresh erhalten.
 
 ### Start, Autostart und Beenden
@@ -144,7 +138,7 @@ begrenzten Wartezeit beendet er bei Bedarf nur seinen eigenen DJ-Prozessbaum.
 AutoHotkey bleibt für spätere Starts verfügbar. Ein Neustart erfordert weder das
 Beenden aller Python-Prozesse noch das Löschen von Cache- oder Lerndateien.
 
-## „Für mich“: persönlicher Spotify-Mix
+## „Standard“: persönlicher Spotify-Mix
 
 Der ehemalige Global-Modus verwendet jetzt deinen Spotify-Hörverlauf statt der
 Vereinigung unserer festen Künstlerpools. Pro Aktualisierung liest er höchstens:
@@ -172,7 +166,7 @@ diese temporären AI-Markierungen nicht mehr vorhanden.
 
 ### Dynamische Musikabschnitte
 
-„Für mich“ startet sofort mit einer lokalen Auswahl. Mit eingerichtetem
+„Standard“ startet sofort mit einer lokalen Auswahl. Mit eingerichtetem
 `ANTHROPIC_API_KEY` plant Claude während der Wiedergabe jeweils einen nächsten
 Abschnitt: Favoriten aus deinen Top-Listen, zuletzt gehörte Musik oder neue
 Empfehlungen mit Bezug zu deinen Hördaten. Die KI wählt dafür eine musikalische
@@ -198,7 +192,7 @@ Es läuft höchstens eine Planung gleichzeitig. Bei Fehlern gelten begrenzte
 Wiederholungen mit Wartezeit und Rate-Limit-Beachtung; der lokale Mix bleibt
 verfügbar. Ohne KI-Ergebnis wechseln lokale Favoriten-/Verlaufsabschnitte weiter.
 Ein anderer Modus oder eine neue AI-Anfrage verwirft ausstehende Planungen.
-Die Auswahl bleibt temporär und verändert keine normalen Lerngewichte.
+Die Auswahl bleibt temporär und erzeugt keine dauerhaften Geschmackspräferenzen.
 
 ## AI-Modus: spontane Wünsche
 
@@ -264,14 +258,14 @@ Zwischen erfolgreichen Versuchen liegen mindestens 30 Sekunden; bei Fehlern gelt
 längere Wartezeiten und gegebenenfalls `Retry-After`.
 
 Doppelte Titel und aktuelle Sperren werden vor der Übernahme geprüft. Ein Fehler
-lässt den vorhandenen Pool unverändert. Neue Anfragen, Genre-/„Für mich“-Modus und
+lässt den vorhandenen Pool unverändert. Neue Anfragen, „Standard“-Modus und
 Quit entwerten alte Aufträge. Bereits laufende HTTP-Anfragen können noch auslaufen,
 ihre Ergebnisse werden verworfen. Die Hintergrundaufrufe verursachen zusätzliche
 AI-Nutzung. Reine erkannte Wiederholungsregel-Änderungen erzeugen keinen neuen AI-Pool.
 
 ### Temporärer Kontext und Datenweitergabe
 
-AI-Sessions ändern keine dauerhaften Lerngewichte, Künstlerpools oder Discovery-Fortschritte.
+AI-Sessions erzeugen keine dauerhaften Geschmackspräferenzen.
 Wiederholungszähler, Ausschlüsse und „weniger davon“ bleiben im RAM. Der Spotify-
 Katalogcache ist davon getrennt und kann Metadaten auch für AI-Anfragen speichern.
 
@@ -279,7 +273,7 @@ Claude erhält die Anfrage und begrenzten Session-Kontext, darunter bis zu vier
 vorherige Nutzeranfragen, die aktuelle Auswahl, gegebenenfalls Referenz-Titel,
 letzten bestätigten Song und temporäre Regeln. Beim Nachladen werden bereits
 gewählte Titel mitgegeben. Tokens und komplette Spotify-Kataloge werden nicht
-als Modellkontext übermittelt. Für „Für mich“ gilt der oben beschriebene begrenzte
+als Modellkontext übermittelt. Für „Standard“ gilt der oben beschriebene begrenzte
 Hördaten-Kontext für die automatische Blockplanung.
 
 ## Spracheingabe
@@ -298,7 +292,7 @@ setzen und den Voice-Client neu starten. Es gibt keine automatische Sprachumscha
 Künstler- und Songnamen können falsch erkannt werden; der erkannte Text erscheint
 im Dashboard. Die Spracheinstellung betrifft nicht die mehrsprachige Text-AI.
 
-## Playback, Geräte und Lernen
+## Playback, Geräte und Gedächtnis
 
 Ein aktives steuerbares Spotify-Gerät hat Vorrang vor `SPOTIFY_DEVICE_NAME`.
 Das bevorzugte Gerät ist nur beim ersten Start ohne aktives Gerät ein Fallback.
@@ -319,25 +313,17 @@ Der DJ kann bei ausreichend gesicherter Hördauer etwa **1,5 Sekunden vor Schlus
 wechseln, damit Spotify nicht kurz den nächsten Albumtrack anspielt. Lückenhafte
 Daten oder manuelle Eingriffe können diesen vorgezogenen Übergang verhindern.
 
-Nur die vier Genre-Modi lernen dauerhaft:
+Es gibt keine automatischen Künstlergewichte, Skip-Abwertungen, zeitlichen
+Gewichtsverfall oder Last.fm-Probeübernahmen mehr. Grundlage für Standard sind
+Spotify-Hördaten. Session-Kontext hält Wünsche, Wiederholungsregeln und zuletzt
+gespielte Musik vorübergehend fest. Nur ausdrückliche Song-/Künstlersperren werden
+als dauerhafte Präferenzen gespeichert.
 
-| Ereignis | Wirkung |
-|---|---|
-| Mindestens 80 % tatsächlich beobachtete Hördauer, natürlicher Übergang | Künstlergewicht +0,15 |
-| Expliziter DJ-Skip bei zuverlässigem Playback-Zustand | Künstlergewicht −0,10 |
-| Moduswechsel, unklarer Zustand oder Sperrbefehl | Keine Abwertung dafür |
-| AI oder „Für mich“ | Keine dauerhafte Gewichtsanpassung |
-
-Die Skip-Regel hat aktuell **keine 25-Prozent-Schwelle**. Fortschritt durch Spulen
-zählt nicht einfach als gehörte Dauer; eine Wiedergabe wird höchstens einmal
-bewertet. Gewichte liegen zwischen 0,2 und 3,0 und bewegen sich beim Laden um
-10 % der Distanz zu 1,0 pro verstrichener Woche zurück Richtung neutral.
-
-Bei einem Genre-Künstlergewicht von 3,0 kann mit 25 % Wahrscheinlichkeit eine
-Last.fm-Entdeckung vorgemerkt werden. Kandidaten werden auf Spotify geprüft;
-mindestens fünf geeignete Tracks sind erforderlich. Fünf positiv bewertete
-Probe-Wiedergaben führen zur dauerhaften Übernahme. Neue Genre-Entdeckungen sind
-von spontanen AI-Wünschen und dem persönlichen Spotify-Mix getrennt.
+Alte Gewichts- und Genre-Recent-Dateien bleiben unverändert auf der Festplatte;
+sie werden nicht mehr geladen oder aktualisiert. Frühere entdeckte Künstler-IDs
+können weiterhin zur Spotify-Auflösung dienen, ihre Lernwerte werden nicht benutzt.
+Spontane Musikwünsche verändern keine eigenen dauerhaften Geschmackspräferenzen.
+Spotify kann diese Wiedergaben dennoch in seine eigenen Top-Listen aufnehmen.
 
 ## Fehlermeldungen und Grenzen
 
@@ -352,7 +338,7 @@ von spontanen AI-Wünschen und dem persönlichen Spotify-Mix getrennt.
   Spotify prüfen und anschließend einen DJ-Befehl senden; keine Reauthentifizierung auf Verdacht.
 - **AI wartet auf Antwort:** Wunsch konkretisieren. Ein unveränderter Prompt beseitigt
   keine fehlende Künstlerzuordnung oder tatsächlich mehrdeutige Aufnahme.
-- **Für mich braucht Leserechte:** `scripts/authorize_history.py` interaktiv ausführen.
+- **Standard braucht Leserechte:** `scripts/authorize_history.py` interaktiv ausführen.
 - **Playback-Daten fehlen:** Keine automatische negative Bewertung und kein erzwungener Neustart.
 
 Die Oberfläche bindet an `127.0.0.1`; sie ist kein eingerichteter Remote-Zugang.
@@ -364,19 +350,19 @@ Einrichtung und sind damit nicht als vollständiger Linux-Betrieb validiert.
 
 | Datei / Bereich | Inhalt |
 |---|---|
-| `src/spotify_dj.py` | DJ-Steuerung, Playback, Filter, Genre-Auswahl, Integration der Modi |
+| `src/spotify_dj.py` | DJ-Steuerung, Playback, Filter, Standard-Mix und Musikwünsche |
 | `src/playback_state.py` | Wiedergabezuordnung, Hördauer und Bewertungslogik |
 | `src/ai_request.py`, `src/music_request.py`, `src/ai_session.py` | AI-Interpretation, Spotify-Auflösung, temporärer Kontext |
 | `src/similarity_selection.py`, `src/background_pool.py` | Referenzvergleich und begrenztes Hintergrund-Nachladen |
 | `src/personal_mix.py` | Persönliche Auswahl aus Spotify-Hördaten |
-| `src/personal_director.py` | Temporäre Musikabschnitte und KI-Planung für „Für mich“ |
+| `src/personal_director.py` | Temporäre Musikabschnitte und KI-Planung für „Standard“ |
 | `src/dj_server.py`, `src/dj_dashboard.html` | Lokaler Server und Oberfläche |
 | `src/instance_lock.py`, `src/shutdown_signal.py`, `src/json_store.py` | Instanzschutz, Beenden und atomare JSON-Schreibvorgänge |
 | `scripts/authorize_history.py` | Interaktive Spotify-Freigabe |
-| `data/dj_memory.json` | Dauerhafte Genre-Lerngewichte |
+| `data/dj_memory.json` | Alte Genre-Lerngewichte; ungenutzt, bleiben erhalten |
 | `data/track_cache.json` | Künstlerkatalogcache, regulär sieben Tage gültig; Nachladen bei Bedarf |
-| `data/recent_tracks.json` | Persistente Recent-Historie der Genre-Modi |
-| `data/discovered_artists.json` | Entdeckte Künstler und Probe-Fortschritt |
+| `data/recent_tracks.json` | Alte Genre-Historie; ungenutzt, bleibt erhalten |
+| `data/discovered_artists.json` | Alte Künstler-IDs; nur lesend für Auflösung, kein Probe-Fortschritt mehr |
 | `data/banned_tracks.json`, `data/banned_artists.json` | Dauerhafte Sperren |
 | `data/dj.lock`, `data/server.lock`, `data/voice.lock` | Prozesssperren |
 | `data/dj_input.txt`, `data/shutdown.signal` | Laufende Steuerung |

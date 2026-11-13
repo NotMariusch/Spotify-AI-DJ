@@ -110,7 +110,7 @@ class PersonalPlaybackTests(unittest.TestCase):
         values = dict(tracker=tracker, now_playing=tracker.track, personal_mix=PersonalMix(), personal_director=dj.PersonalDirector(),
                       _prepared_next=None, _pending_selection=None, auto_mode='global', ai_pool=[],
                       banned_track_ids=set(), banned_artist_names=set(), ai_session=dj.AISession(),
-                      memory=dj.default_memory(), discovered_artists={})
+                      discovered_artists={})
         for key, value in values.items():
             self.stack.enter_context(patch.object(dj, key, value))
         self.sp = self.stack.enter_context(patch.object(dj, 'sp', Mock()))
@@ -118,7 +118,7 @@ class PersonalPlaybackTests(unittest.TestCase):
         self.sp.current_user_recently_played.return_value = dict(items=[dict(track=track())])
         self.sp.current_user_top_tracks.return_value = dict(items=[track('Two', 'Other')])
         self.start = self.stack.enter_context(patch.object(dj, 'safe_play', side_effect=self.confirm))
-        for method in ('save_memory', 'save_recent', 'run_pending_discoveries', 'update_weight'):
+        for method in ('write_json_atomic',):
             self.stack.enter_context(patch.object(dj, method))
 
     def confirm(self, **kwargs):
@@ -129,9 +129,7 @@ class PersonalPlaybackTests(unittest.TestCase):
         self.assertEqual(dj.now_playing['mode'], 'global')
         self.assertEqual(sum(dj.personal_mix.plays.values()), 1)
         dj.judge_last_track(interrupted=True)
-        dj.update_weight.assert_not_called()
-        dj.save_recent.assert_not_called()
-        dj.run_pending_discoveries.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.sp.reset_mock()
         dj.now_playing.update(progress_ms=185000, preparation_attempted=False)
         dj.prepare_next_track()
@@ -144,7 +142,7 @@ class PersonalPlaybackTests(unittest.TestCase):
         self.assertFalse(dj.play_global_mix(mode_switch=True))
         self.start.assert_not_called()
         self.sp.current_user_recently_played.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_failed_start_does_not_count_as_listened(self):
         self.start.side_effect = None

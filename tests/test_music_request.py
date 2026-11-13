@@ -375,14 +375,14 @@ class StructuredPlaybackTests(unittest.TestCase):
                       ai_session_catalogs={}, ai_artist_plays={}, ai_last_artist=None, ai_session=dj.AISession(),
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
                       auto_mode='ai', current_pool=None, _prepared_next=None, _pending_selection=None,
-                      memory=dj.default_memory(), artist_cache={}, track_disk_cache={},
+                      artist_cache={}, track_disk_cache={},
                       banned_track_ids=set(), banned_artist_names=set())
         for key, value in values.items():
             self.stack.enter_context(patch.object(dj, key, value))
         self.sp = self.stack.enter_context(patch.object(dj, 'sp', Mock()))
         self.sp.search.return_value = {'tracks': {'items': []}}
         self.stack.enter_context(patch.object(dj.time, 'sleep'))
-        for name in ('save_memory', 'save_recent', 'save_track_cache', 'run_pending_discoveries', 'record_trial_play'):
+        for name in ('write_json_atomic', 'save_track_cache'):
             self.stack.enter_context(patch.object(dj, name))
         self.fetch = self.stack.enter_context(patch.object(dj, 'get_artist_tracks'))
         self.start = self.stack.enter_context(patch.object(dj, 'safe_play', side_effect=self.confirm))
@@ -398,15 +398,13 @@ class StructuredPlaybackTests(unittest.TestCase):
     def test_reference_first_then_only_matching_pool_without_learning(self):
         dj.ai_request_plan = self.reference_plan()
         dj.artist_cache['Artist'] = [song('Anchor'), song('Hit'), song('Unrelated')]
-        before = copy.deepcopy(dj.memory)
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
         self.assertEqual(dj.now_playing['uri'], song('Anchor')['uri'])
         self.assertFalse(dj.explicit_songs_pending())
         self.assertEqual({t['name'] for t in dj.ai_session_catalogs['Artist']}, {'Anchor', 'Hit'})
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True, interrupted=False))
         self.assertEqual(dj.now_playing['uri'], song('Hit')['uri'])
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.fetch.assert_not_called()
 
     def test_verified_soundtrack_evidence_is_used_for_first_playback(self):
@@ -422,7 +420,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         self.assertEqual(dj.now_playing['uri'], fixture.track['uri'])
         self.sp.search.assert_not_called()
         self.fetch.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_all_references_confirmed_before_musical_selection(self):
         from dataclasses import replace
@@ -435,7 +433,7 @@ class StructuredPlaybackTests(unittest.TestCase):
             self.assertEqual(select.call_args.args[0].reference_songs[0].title, 'Anchor')
             self.assertEqual(select.call_args.args[0].songs, ())
             self.start.assert_not_called()
-            dj.save_memory.assert_not_called()
+            dj.write_json_atomic.assert_not_called()
 
     def test_missing_reference_never_triggers_recommendation_call(self):
         with patch.object(dj, 'resolve_artists_to_ids', return_value=[('Artist', 'artist')]), \
@@ -457,7 +455,6 @@ class StructuredPlaybackTests(unittest.TestCase):
         from music_request import SongWish
         dj.ai_request_plan = self.reference_plan()
         dj.ai_session_catalogs['Artist'] = [song('Hit')]
-        before = copy.deepcopy(dj.memory)
         controller = Mock()
         controller.poll.return_value = (([('Artist', song('Hit')), ('Artist', song('New'))],
                                          (SongWish('Artist', 'New'),)), None)
@@ -465,8 +462,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         with patch.object(dj, 'ai_refill', controller), patch.object(dj, 'ai_refill_seen', set()):
             dj.service_ai_refill()
             self.assertEqual([t['name'] for t in dj.ai_session_catalogs['Artist']], ['Hit', 'New'])
-            self.assertEqual(dj.memory, before)
-            dj.save_memory.assert_not_called()
+            dj.write_json_atomic.assert_not_called()
             dj.save_track_cache.assert_not_called()
             self.start.assert_not_called()
 
@@ -518,13 +514,11 @@ class StructuredPlaybackTests(unittest.TestCase):
         dj.ai_request_plan = check_request_kind(plan, '2000s pop from my childhood please')
         dj.artist_cache['Artist'] = [song('SexyBack', isrc='USABC0300001'),
                                     song('SexyBack', isrc='USABC0300002', duration_ms=240000)]
-        before = copy.deepcopy(dj.memory)
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
         self.assertEqual(dj.now_playing['uri'], song('SexyBack')['uri'])
         self.assertEqual(dj.ai_song_queue, [])
-        self.assertEqual(dj.memory, before)
         self.fetch.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def prepare(self):
         dj.now_playing.update(progress_ms=185000, listened_ms=185000, preparation_attempted=False)
@@ -533,7 +527,6 @@ class StructuredPlaybackTests(unittest.TestCase):
     def test_hits_pool_contains_only_resolved_hints_in_era_and_keeps_constraints_on_transition(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit'), dict(artist='Artist', title='HitTwo')])
         dj.artist_cache['Artist'] = [song(), song('HitTwo'), song('DeepCut'), song('Future', '2013')]
-        before = copy.deepcopy(dj.memory)
         self.assertTrue(dj.play_artist('Artist', 'ai', no_judge=True))
         self.assertEqual({t['name'] for t in dj.ai_session_catalogs['Artist']}, {'Hit', 'HitTwo'})
         first = dj.now_playing['uri']
@@ -543,10 +536,8 @@ class StructuredPlaybackTests(unittest.TestCase):
         dj.now_playing['confirmed'] = False
         dj.advance_to_next_track()
         self.assertTrue(dj.now_playing['is_ai_play'])
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
-        dj.run_pending_discoveries.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.fetch.assert_not_called()
 
     def test_explicit_list_order_overrides_recent_history_and_stops_after_last(self):
@@ -613,7 +604,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         self.sp.search.side_effect = dj.RateLimitError(30)
         self.assertFalse(dj.play_artist('Artist', 'ai', no_judge=True))
         self.start.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.sp.search.assert_called_once()
         self.fetch.assert_not_called()
 
@@ -629,7 +620,7 @@ class StructuredPlaybackTests(unittest.TestCase):
                 dj.run_dj()
         self.assertEqual(dj.ai_request_plan.year_end, 2009)
         self.assertEqual(dj.now_playing['uri'], song()['uri'])
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_normal_mode_does_not_inherit_ai_year_constraint(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])
@@ -640,7 +631,7 @@ class StructuredPlaybackTests(unittest.TestCase):
         dj.play_artist('Artist', 'jpop', ['Artist'], mode_switch=True)
         self.assertEqual(dj.now_playing['uri'], song('Future', '2013')['uri'])
         self.assertFalse(dj.now_playing['is_ai_play'])
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_broad_hits_search_directly_without_downloading_full_catalog(self):
         dj.ai_request_plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')])

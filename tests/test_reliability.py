@@ -125,13 +125,12 @@ class IntegrationTests(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-        for attr in ('save_memory', 'save_recent', 'save_track_cache', 'record_trial_play', 'run_pending_discoveries'):
+        for attr in ('write_json_atomic', 'save_track_cache'):
             self.stack.enter_context(patch.object(dj, attr))
         self.stack.enter_context(patch.object(dj.time, 'sleep'))
         self.stack.enter_context(patch.dict(os.environ, {'SPOTIFY_DEVICE_NAME': ''}))
         dj.tracker = PlaybackTracker()
         dj.now_playing = dj.tracker.track
-        dj.memory = dj.default_memory()
         dj.ai_pool = []
         dj.ai_artists = {}
         dj.ai_session_catalogs = {}
@@ -168,15 +167,15 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(dj.sp.start_playback.call_count, 1)
         self.assertFalse(dj.now_playing.get('confirmed'))
         self.assertEqual(list(dj.recent_titles), [])
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         dj.judge_last_track(interrupted=True)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_delayed_confirmation_then_recent_history(self):
         dj.sp.current_playback.side_effect = [None, playback(uri='spotify:track:other'), playback()]
         self.assertTrue(dj.start_selected('Artist', 'jpop', track(), False))
         self.assertTrue(dj.now_playing['confirmed'])
-        self.assertEqual(list(dj.recent_titles), ['old'])
+        self.assertEqual(list(dj.recent_titles), [])
         self.assertEqual(dj.sp.start_playback.call_args.kwargs,
                          dict(device_id='pc', context_uri='spotify:album:album',
                               offset={'uri': 'spotify:track:old'}, position_ms=0))
@@ -196,7 +195,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertFalse(dj.start_selected('Artist', 'ai', track(), True))
         self.assertEqual(dj.sp.current_playback.call_count, 4)
         self.assertEqual(dj.ai_artist_plays, {})
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_no_arbitrary_device_fallback(self):
         dj.sp.devices.return_value = {'devices': [dict(id='phone', name='iPhone', is_active=False)]}
@@ -246,24 +245,21 @@ class IntegrationTests(unittest.TestCase):
     def test_ai_fallback_only_within_request_and_no_learning(self):
         dj.ai_pool = [('Ado', 'ado'), ('Eve', 'eve')]
         dj.tracker.start('Previous', 'global', track(), playback(), 0)
-        before = copy.deepcopy(dj.memory)
         with patch.object(dj, 'get_artist_tracks', side_effect=[[], [track()]]) as fetch:
             dj.sp.current_playback.return_value = playback()
-            self.assertTrue(dj.play_artist('Ado', 'ai', dj.GLOBAL_POOL, no_judge=True, mode_switch=True))
+            self.assertTrue(dj.play_artist('Ado', 'ai', list(dj.ARTISTS), no_judge=True, mode_switch=True))
         self.assertEqual([c.args[0] for c in fetch.call_args_list], ['Ado', 'Eve'])
         self.assertTrue(dj.now_playing['is_ai_play'])
         dj.judge_last_track(interrupted=True)
-        self.assertEqual(before, dj.memory)
-        dj.save_memory.assert_not_called()
-        dj.run_pending_discoveries.assert_not_called()
-        dj.save_recent.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.assertEqual(list(dj.recent_titles), [])
         self.assertEqual(list(dj.ai_recent_titles), ['old'])
 
     def test_ai_no_tracks_is_bounded(self):
         dj.ai_pool = [('Ado', 'ado'), ('Eve', 'eve')]
         with patch.object(dj, 'get_artist_tracks', return_value=[]) as fetch:
-            self.assertFalse(dj.play_artist('Ado', 'ai', dj.GLOBAL_POOL, no_judge=True))
+            self.assertFalse(dj.play_artist('Ado', 'ai', list(dj.ARTISTS), no_judge=True))
         self.assertEqual(fetch.call_count, 2)
         dj.sp.start_playback.assert_not_called()
         self.assertFalse(dj.tracker.control)
@@ -378,7 +374,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertFalse(dj.track_finished())
         telemetry.assert_called_once_with(None)
         self.assertFalse(dj.now_playing['reliable'])
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         dj.sp.start_playback.assert_not_called()
 
     def test_natural_boundary_updates_weight_once(self):
@@ -390,15 +386,14 @@ class IntegrationTests(unittest.TestCase):
             self.assertTrue(dj.track_finished())
             self.assertFalse(dj.track_finished())
         dj.judge_last_track()
-        self.assertEqual(dj.memory['modes']['jpop']['Artist'], 1.15)
-        dj.save_memory.assert_called_once()
+        dj.write_json_atomic.assert_not_called()
 
     def test_manual_change_before_skip_does_not_penalize_old_artist(self):
         dj.tracker.start('Artist', 'jpop', track(), playback(), 0)
         dj.sp.current_playback.return_value = playback(0, 'spotify:track:manual')
         with patch.object(dj, 'get_artist_tracks', return_value=[]):
             dj.play_artist('Next', 'jpop', interrupted=True)
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_playback_error_does_not_reauthenticate_or_fallback(self):
         dj.sp.start_playback.side_effect = dj.spotipy.SpotifyException(404, -1, 'not ready')
@@ -415,7 +410,7 @@ class IntegrationTests(unittest.TestCase):
             dj.observe_external_playback()
         dj.sp.current_playback.assert_called_once()
         dj.sp.start_playback.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
         self.assertFalse(dj.tracker.control)
 
     def test_normal_mode_after_ai_does_not_judge_ai_track(self):
@@ -424,7 +419,7 @@ class IntegrationTests(unittest.TestCase):
         with patch.object(dj, 'get_artist_tracks', return_value=[track()]):
             self.assertTrue(dj.play_artist('Artist', 'jpop', mode_switch=True))
         self.assertFalse(dj.now_playing['is_ai_play'])
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_ai_natural_completion_does_not_update_preferences(self):
         dj.tracker.start('Ado', 'ai', track(), playback(), 0, ai=True, trial=True)
@@ -433,12 +428,11 @@ class IntegrationTests(unittest.TestCase):
         dj.sp.current_playback.return_value = playback(0, 'spotify:track:new')
         with patch.object(dj.time, 'monotonic', return_value=200):
             self.assertTrue(dj.track_finished())
-        dj.save_memory.assert_not_called()
-        dj.record_trial_play.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_failed_ai_request_then_skip_cannot_escape_to_old_global_pool(self):
         dj.auto_mode = 'global'
-        dj.current_pool = dj.GLOBAL_POOL
+        dj.current_pool = list(dj.ARTISTS)
         inputs = [io.StringIO('ai:Play Ado and Eve'), io.StringIO('skip'), io.StringIO('quit')]
         with patch.object(dj.os.path, 'exists', return_value=True), \
                 patch('builtins.open', side_effect=inputs), \
@@ -451,7 +445,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(dj.auto_mode, 'ai')
         self.assertIsNone(dj.current_pool)
         global_play.assert_not_called()
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
 
 class DashboardTests(unittest.TestCase):
@@ -461,7 +455,7 @@ class DashboardTests(unittest.TestCase):
         old = dict(server.state)
         self.addCleanup(lambda: server.state.update(old))
         with patch.object(server, 'dj_log_queue', queue.Queue()):
-            lines = ['MODE:german_trap', 'DJ_STATUS:Start angefordert; warte auf Spotify-Bestätigung',
+            lines = ['MODE:global', 'DJ_STATUS:Start angefordert; warte auf Spotify-Bestätigung',
                      'DJ -> Sierra Kidd', '  Sierra Kidd — Song',
                      'NOW_PLAYING:Song', 'IS_PLAYING:true', 'DJ_STATUS:DJ aktiv']
             lines += ['CURRENT_ARTIST:Sierra Kidd'] * 20
@@ -479,7 +473,7 @@ class DashboardTests(unittest.TestCase):
                                        'Start nicht bestätigt; neuer DJ-Befehl erforderlich'])
             self.assertEqual(server.state['current_artist'], 'Sierra Kidd')
             self.assertEqual(server.state['current_track'], 'Song')
-            self.assertEqual(server.state['mode'], 'German Trap')
+            self.assertEqual(server.state['mode'], 'Standard')
             self.assertFalse(server.state['is_playing'])
 
     def test_dashboard_and_status_protocol_without_child_or_network(self):
@@ -487,7 +481,7 @@ class DashboardTests(unittest.TestCase):
         old = dict(server.state)
         self.addCleanup(lambda: server.state.update(old))
         with patch.object(server, 'subprocess') as process:
-            server.parse_dj_line('MODE:german_trap')
+            server.parse_dj_line('MODE:global')
             server.parse_dj_line('DJ_STATUS:Warte auf Spotify-Gerät')
             server.parse_dj_line('CURRENT_ARTIST:Artist')
             server.parse_dj_line('NOW_PLAYING:Song')
@@ -496,7 +490,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn(b'id="dj-status"', response.data)
             self.assertEqual(server.state['status'], 'Warte auf Spotify-Gerät')
-            self.assertEqual(server.state['mode'], 'German Trap')
+            self.assertEqual(server.state['mode'], 'Standard')
             self.assertEqual(server.state['current_track'], 'Song')
             self.assertFalse(server.state['is_playing'])
             process.Popen.assert_not_called()

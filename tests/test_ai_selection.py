@@ -158,10 +158,10 @@ class AIRotationTests(unittest.TestCase):
                       ai_recent_titles=[], recent_titles=[], recent_artists=[],
                       current_pool=None, auto_mode='ai', _prepared_next=None,
                       _pending_selection=None, banned_track_ids=set(), banned_artist_names=set(),
-                      memory=dj.default_memory(), artist_cache={}, track_disk_cache={})
+                      artist_cache={}, track_disk_cache={})
         for name, value in values.items():
             self.stack.enter_context(patch.object(dj, name, value))
-        for name in ('save_memory', 'save_recent', 'record_trial_play', 'run_pending_discoveries'):
+        for name in ('write_json_atomic',):
             self.stack.enter_context(patch.object(dj, name))
         self.catalogs = {n: [track(n, i) for i in range(4)] for n in 'ABCD'}
         self.fetch = self.stack.enter_context(patch.object(dj, 'get_artist_tracks', side_effect=lambda n: self.catalogs[n]))
@@ -189,7 +189,6 @@ class AIRotationTests(unittest.TestCase):
         self.assertEqual(self.fetch.call_count, 4)  # No additional end-window fetch.
 
     def test_two_random_rounds_cover_all_artists_without_adjacent_repeats(self):
-        before = copy.deepcopy(dj.memory)
         dj.play_artist('A', 'ai', no_judge=True)
         played = [dj.now_playing['artist']]
         for _ in range(7):
@@ -204,17 +203,14 @@ class AIRotationTests(unittest.TestCase):
         self.assertEqual(set(played[4:]), set('ABCD'))
         self.assertTrue(all(a != b for a, b in zip(played, played[1:])))
         self.assertEqual(set(dj.ai_artist_plays.values()), {2})
-        self.assertEqual(dj.memory, before)
-        dj.save_memory.assert_not_called()
-        dj.save_recent.assert_not_called()
-        dj.record_trial_play.assert_not_called()
-        dj.run_pending_discoveries.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_skip_cannot_force_repeat_when_other_requested_artists_are_playable(self):
         dj.play_artist('A', 'ai', no_judge=True)
         dj.play_artist('A', 'ai', no_judge=True, interrupted=False)
         self.assertNotEqual(dj.now_playing['artist'], 'A')
-        dj.save_memory.assert_not_called()
+        dj.write_json_atomic.assert_not_called()
 
     def test_explicit_single_artist_request_never_introduces_other_artists(self):
         dj.ai_pool = [('A', 'A')]

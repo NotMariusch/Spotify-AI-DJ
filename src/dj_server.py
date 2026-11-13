@@ -89,10 +89,9 @@ def parse_dj_line(line: str):
         state["status"] = line[len("DJ_STATUS:"):]
     if line.startswith("MODE:"):
         mode = line[len("MODE:"):]
-        state["mode"] = {"american_rap": "American Rap", "german_trap": "German Trap",
-                         "kpop": "K-Pop", "jpop": "J-Pop", "global": "Für mich"}.get(mode, mode)
+        state["mode"] = {"global": "Standard"}.get(mode, mode)
     if re.search(r"AI request:", line):
-        state["current_artist"] = "AI Mode"
+        state["current_artist"] = "—"
         state["mode"] = "AI"
     if line.startswith("NOW_PLAYING:"):
         state["current_track"] = line[len("NOW_PLAYING:"):]
@@ -309,12 +308,12 @@ def handle_command(data):
     if shutdown_requested.is_set():
         return
 
-    mode_labels = {"1": "American Rap", "2": "German Trap", "3": "K-Pop", "4": "J-Pop", "5": "Für mich"}
+    mode_labels = {"5": "Standard"}
 
-    if cmd == "ai-mode":
+    if cmd in ("ai-mode", "1", "2", "3", "4"):
         return  # UI-only, no action
 
-    if cmd in ("skip", "ban", "ban-artist", "quit") or cmd in ("1", "2", "3", "4", "5"):
+    if cmd in ("skip", "ban", "ban-artist", "quit") or cmd == "5":
         send_command(cmd)
         if cmd in mode_labels:
             state["mode"]           = mode_labels[cmd]
@@ -330,13 +329,13 @@ def handle_command(data):
         req = cmd[3:].strip()
         send_command(cmd)
         state["mode"]           = "AI"
-        state["current_artist"] = "AI Mode"
+        state["current_artist"] = "—"
         voice_log_queue.put(f"→ AI request: \"{req}\"")
 
     else:
         send_command(f"ai:{cmd}")
         state["mode"]           = "AI"
-        state["current_artist"] = "AI Mode"
+        state["current_artist"] = "—"
         voice_log_queue.put(f"→ AI request: \"{cmd}\"")
 
 

@@ -40,15 +40,11 @@ KEY_6 = 7; KEY_7 = 8; KEY_8 = 9; KEY_9 = 10
 KEY_V = 47
 
 COMMANDS = {
-    KEY_1: "1",
-    KEY_2: "2",
-    KEY_3: "3",
-    KEY_4: "4",
-    KEY_5: "5",
-    KEY_6: "skip",
-    KEY_7: "ban-artist",
-    KEY_8: "ban",
-    KEY_9: "quit",
+    KEY_1: "5",
+    KEY_2: "skip",
+    KEY_3: "ban-artist",
+    KEY_4: "ban",
+    KEY_5: "quit",
     KEY_V: "voice",
 }
 
@@ -60,7 +56,7 @@ def send_command(text):
 def main():
     print("SpotifyDJ Hotkeys (Linux)")
     print(f"Listening on {KEYBOARD_DEVICE}")
-    print("F13+1-5: modes | F13+6: skip | F13+7: ban artist | F13+8: ban track | F13+9: quit")
+    print("F13+1: Standard | F13+2: skip | F13+3: ban artist | F13+4: ban track | F13+5: quit")
     print()
 
     f13_held = False
