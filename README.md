@@ -324,6 +324,14 @@ Playback verwendet bewusst **Album-Kontext plus Track-Offset**. Der direkte
 `uris=[…]`-Start war im Projekt reproduzierbar unzuverlässig. Eine erfolgreiche
 Startanfrage allein gilt nicht als Wiedergabe: Der DJ prüft Track, Gerät,
 Album-Kontext, Wiedergabestatus und Startposition in vier begrenzten Abfragen.
+Bei abweichender Track-URI darf eine Spotify-Verknüpfung (`linked_from`) oder
+gleiche ISRC dieselbe Aufnahme bestätigen. Titel (mit optionalem Feature-Zusatz),
+Künstler-ID und Dauer müssen zusammenpassen; widersprüchliche Explicit-Angaben
+werden abgelehnt. Fehlen ISRCs, sind ausschließlich bei plausibler Abweichung
+höchstens zwei zusätzliche Metadatenabfragen pro Start erlaubt. Ohne belastbaren
+Nachweis bleibt der Start unbestätigt. Nach Bestätigung verfolgt der DJ die
+tatsächlich laufende URI, während die ursprüngliche Songwunsch-Warteschlange
+genau einmal weitergeschaltet wird. Der Album-Startweg bleibt erhalten.
 Fehlgeschlagene Starts erzeugen keine Hörbewertung.
 
 Der DJ kann bei ausreichend gesicherter Hördauer etwa **1,5 Sekunden vor Schluss**

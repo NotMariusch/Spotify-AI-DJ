@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from collections import deque
 from dataclasses import replace
 from playback_state import PlaybackTracker
+from recording_match import compatible as compatible_recording, match_reason, isrc as confirmed_isrc
 from instance_lock import InstanceLock
 from json_store import write_json_atomic
 from ai_request import ask_claude, resolve_artists_to_ids, ModelRateLimitError, ModelTimeoutError
@@ -430,8 +431,8 @@ sp = None
 DEBUG_MODE = os.getenv("DJ_DEBUG", "0") == "1"
 
 
-def safe_play(_device_id=None, _expected_title=None, **kwargs):
-    """Request once, then confirm the exact track and device in four polls."""
+def safe_play(_device_id=None, _expected_title=None, _expected_track=None, **kwargs):
+    """Request once, confirm URI or proven recording substitution in four polls."""
     if DEBUG_MODE:
         status("Debug: kein Playback angefordert")
         return None
@@ -445,6 +446,8 @@ def safe_play(_device_id=None, _expected_title=None, **kwargs):
     sp.start_playback(device_id=device_id, **kwargs)
     confirmation_problem = 'keine Playback-Daten'
     last_pb = None
+    evidence = copy.deepcopy(_expected_track or {'uri': expected_uri})
+    metadata = {}  # At most two extra reads per start, only for plausible substitutions.
     for delay in (1, 2, 2, 3):
         time.sleep(delay)
         try:
@@ -456,12 +459,38 @@ def safe_play(_device_id=None, _expected_title=None, **kwargs):
             confirmation_problem = f'Playback-Abfrage fehlgeschlagen ({type(error).__name__})'
             continue
         position = (pb or {}).get('progress_ms')
-        if (pb and pb.get("is_playing") and (pb.get("item") or {}).get("uri") == expected_uri
+        actual = (pb or {}).get('item') or {}
+        ready = (pb and pb.get("is_playing")
                 and (pb.get("device") or {}).get("id") == device_id
                 and (pb.get("context") or {}).get("uri") == kwargs["context_uri"]
                 and isinstance(position, (int, float)) and math.isfinite(position)
-                and requested_position <= position <= requested_position + 10000):
+                and requested_position <= position <= requested_position + 10000)
+        if ready and actual.get('uri') == expected_uri:
             return pb
+        if ready and compatible_recording(evidence, actual) and actual.get('id') not in banned_track_ids:
+            verified = dict(actual)
+            reason = match_reason(evidence, verified)
+            if not reason:
+                for candidate in (evidence, verified):
+                    uri = candidate.get('uri')
+                    if confirmed_isrc(candidate) or not uri or uri in metadata or len(metadata) >= 2:
+                        continue
+                    metadata[uri] = None
+                    try:
+                        detail = sp.track(uri)
+                        if isinstance(detail, dict) and detail.get('uri') == uri and compatible_recording(candidate, detail):
+                            metadata[uri] = detail.get('external_ids')
+                    except RateLimitError:
+                        raise
+                    except Exception:
+                        pass  # Missing evidence never authorizes a substitution.
+                for candidate in (evidence, verified):
+                    if not confirmed_isrc(candidate) and metadata.get(candidate.get('uri')):
+                        candidate['external_ids'] = metadata[candidate['uri']]
+                reason = match_reason(evidence, verified)
+            if reason:
+                print(f'  Spotify-Katalogfassung bestätigt ({reason}); tatsächliche Track-URI wird verfolgt.')
+                return pb
         if not pb or not pb.get('item'):
             confirmation_problem = 'Spotify meldet keinen Track'
         elif (pb.get('device') or {}).get('id') != device_id:
@@ -657,6 +686,7 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
     pb = safe_play(
         _device_id=device_id,
         _expected_title=f"{name} — {chosen['name']}",
+        _expected_track=chosen,
         context_uri=chosen["album"]["uri"],
         offset={"uri": chosen["uri"]}, position_ms=0,
     )
@@ -664,7 +694,12 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
         tracker.control = False
         return False
     ai_session.record_play(name, chosen, count_start=True)
-    tracker.start(name, mode, chosen, pb, time.monotonic(), ai=no_judge,
+    actual = pb.get('item') or {}
+    tracked = dict(chosen)
+    if actual.get('uri') and actual['uri'] != chosen['uri']:
+        tracked.update(uri=actual['uri'], duration_ms=actual['duration_ms'], name=actual['name'])
+        ai_session.record_play(name, actual)
+    tracker.start(name, mode, tracked, pb, time.monotonic(), ai=no_judge,
                   trial=False)
     if no_judge:
         if len(ai_history_exclusions) < 2000:
@@ -684,12 +719,12 @@ def start_selected(name, mode, chosen, no_judge, device_id=None):
             print(announcement[1])
     log_section("Neuer Song")
     print(f"{'Standard DJ' if mode == 'global' else 'DJ'} -> {name}")
-    print(f"  {name} — {chosen['name']}")
+    print(f"  {name} — {tracked['name']}")
     if no_judge and ai_request_plan is not None and ai_request_plan.year_start is not None:
         year = chosen.get("_dj_source_year", release_year(chosen))
         print(f"  AI year evidence: {year} ({chosen.get('_dj_era_basis', 'Spotify-Katalogdatum')})")
     print(f"CURRENT_ARTIST:{name}")
-    print(f"NOW_PLAYING:{chosen['name']}")
+    print(f"NOW_PLAYING:{tracked['name']}")
     print("IS_PLAYING:true")
     publish_progress(pb)
     status("DJ aktiv")
