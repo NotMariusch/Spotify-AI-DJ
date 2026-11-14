@@ -40,6 +40,35 @@ class RecordingMatchTests(unittest.TestCase):
         self.sp.start_playback.assert_called_once_with(device_id='pc', context_uri='spotify:album:album',
                                                      offset={'uri': self.expected['uri']}, position_ms=0)
 
+    def test_localized_title_with_equal_isrc_is_confirmed(self):
+        self.expected['name'], self.actual['name'] = '新時代', 'New Genesis'
+        self.assertIs(self.start(), self.pb)
+        self.sp.track.assert_not_called()
+
+    def test_localized_title_fetches_missing_isrc_once(self):
+        self.expected['name'], self.actual['name'] = '新時代', 'New Genesis'
+        detail = copy.deepcopy(self.expected)
+        self.expected.pop('external_ids')
+        self.sp.track.return_value = detail
+        self.assertIs(self.start(), self.pb)
+        self.sp.track.assert_called_once_with(self.expected['uri'])
+
+    def test_localized_title_without_matching_evidence_is_not_accepted(self):
+        self.expected['name'], self.actual['name'] = '新時代', 'New Genesis'
+        self.actual['external_ids'] = {'isrc': 'USABC1700002'}
+        self.assertIsNone(self.start())
+        self.expected.pop('external_ids')
+        self.actual.pop('external_ids')
+        self.sp.track.return_value = {}
+        self.assertIsNone(self.start())
+        self.assertEqual(self.sp.track.call_count, 2)
+
+    def test_localized_title_still_rejects_version_and_metadata_conflicts(self):
+        self.expected['name'], self.actual['name'] = '新時代', 'New Genesis'
+        for change in ({'name': 'New Genesis - Live'}, {'name': 'New Genesis - Remix'},
+                       {'explicit': True}, {'duration_ms': 220000}, {'artists': [{'id': 'other'}]}):
+            self.assertIsNone(match_reason(self.expected, dict(self.actual, **change)))
+
     def test_direct_link_without_isrc_is_accepted(self):
         self.actual.pop('external_ids')
         self.actual['linked_from'] = {'uri': self.expected['uri']}
@@ -83,6 +112,7 @@ class RecordingMatchTests(unittest.TestCase):
         self.sp.track.assert_not_called()
 
     def test_tracker_uses_actual_uri_while_ordered_wish_is_consumed_once(self):
+        self.expected['name'], self.actual['name'] = '新時代', 'New Genesis'
         tracker = PlaybackTracker()
         with patch.object(dj, 'tracker', tracker), patch.object(dj, 'now_playing', tracker.track), \
                 patch.object(dj, 'ai_session', dj.AISession()), patch.object(dj, 'ai_song_queue', [('Artist', self.expected)]), \

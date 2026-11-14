@@ -1,7 +1,6 @@
 """Conservative confirmation of Spotify catalog substitutions, not fuzzy search."""
 import math
 import re
-from music_request import song_key
 
 
 def isrc(track):
@@ -11,8 +10,15 @@ def isrc(track):
 
 
 def compatible(expected, actual):
-    """Reject other artists, versions, durations and explicit/clean conflicts."""
-    if not expected.get('name') or song_key(expected['name']) != song_key(actual.get('name', '')):
+    """Screen metadata before identity proof; translated titles may differ."""
+    names = [t.get('name') for t in (expected, actual)]
+    if not all(isinstance(name, str) and name.strip() for name in names):
+        return False
+    # A matching ISRC must not hide an explicit version conflict in the metadata.
+    # Do not require title equality: localized names can denote the same recording.
+    versions = [set(re.findall(r'\b(?:remix|live|acoustic|instrumental|karaoke|slowed|sped[ -]?up|remaster(?:ed)?|radio edit)\b',
+                               name.casefold())) for name in names]
+    if versions[0] != versions[1]:
         return False
     primary = (expected.get('artists') or [{}])[0].get('id')
     if not primary or primary not in {a.get('id') for a in actual.get('artists', [])}:

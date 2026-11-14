@@ -325,8 +325,9 @@ Playback verwendet bewusst **Album-Kontext plus Track-Offset**. Der direkte
 Startanfrage allein gilt nicht als Wiedergabe: Der DJ prüft Track, Gerät,
 Album-Kontext, Wiedergabestatus und Startposition in vier begrenzten Abfragen.
 Bei abweichender Track-URI darf eine Spotify-Verknüpfung (`linked_from`) oder
-gleiche ISRC dieselbe Aufnahme bestätigen. Titel (mit optionalem Feature-Zusatz),
-Künstler-ID und Dauer müssen zusammenpassen; widersprüchliche Explicit-Angaben
+gleiche ISRC dieselbe Aufnahme bestätigen. Lokalisierte Titelnamen dürfen dabei
+abweichen (etwa japanischer und englischer Name). Künstler-ID und Dauer müssen
+zusammenpassen; widersprüchliche Versionskennzeichnungen und Explicit-Angaben
 werden abgelehnt. Fehlen ISRCs, sind ausschließlich bei plausibler Abweichung
 höchstens zwei zusätzliche Metadatenabfragen pro Start erlaubt. Ohne belastbaren
 Nachweis bleibt der Start unbestätigt. Nach Bestätigung verfolgt der DJ die
