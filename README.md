@@ -263,6 +263,42 @@ weist ausdrücklich darauf hin. Ein erfolgreicher Abschnitt setzt den Fehlerzäh
 Ein anderer Modus oder eine neue AI-Anfrage verwirft ausstehende Planungen.
 Die Auswahl bleibt temporär und erzeugt keine dauerhaften Geschmackspräferenzen.
 
+### Passung, Abwechslung und Session-Feedback
+
+Die KI plant eine konkrete gemeinsame Richtung pro Abschnitt, etwa Groove,
+Instrumentierung, Energie oder Refrain-Stil. Entdeckungen beziehen sich auf
+höchstens zwei Referenzsongs aus den bereitgestellten Hördaten; weitere
+Referenzen werden bei der Validierung ausgelassen. Die Richtung erscheint
+ausdrücklich als **KI-Richtung** neben der verifizierten Quellen-/Künstleransage.
+Das ist keine Audioanalyse: Ob die Songs musikalisch überzeugen, bleibt im
+Hörtest zu prüfen. Es gibt dafür keinen zusätzlichen KI-Prüfaufruf.
+
+Die Planung strebt einen Entdeckungsblock auf zwei vertraute Blöcke an.
+Verfügbarkeit und lokale Fallbacks können dieses Verhältnis verändern.
+Die Künstler der letzten zwölf bestätigten Starts erhalten bei der Auswahl
+weniger Vorrang; direkte Wiederholungsvermeidung und ungespielte Songs bleiben
+vorrangig. Diese Rotation gilt nur für Standard.
+
+Während Standard aktiv ist, zeigt das Dashboard **Mehr davon** und
+**Weniger davon**. Auch die eigenständigen Chat-Nachrichten „mehr davon“ /
+„weniger davon“ oder „more like this“ / „less like this“ funktionieren.
+Im AI-Modus bleiben solche Texte gewöhnliche AI-Folgeanfragen.
+
+Feedback bezieht sich auf den bestätigten Song und die aktuelle Richtung:
+Mehr bevorzugt ähnliche Musik in der nächsten Planung und den Künstler in der
+lokalen Auswahl. Weniger beendet den Abschnitt nach dem laufenden Song und
+bevorzugt andere Künstler und Richtungen. Es ist keine Sperre: Ist die Auswahl
+zu klein, darf der lokale Mix weiterhin auf diese Künstler zurückgreifen.
+Der aktuelle Song wird weder geskippt noch pausiert. Vorbereitete Auswahl und
+veraltete Hintergrundplanung werden verworfen; wiederholtes identisches
+Feedback zum selben Song startet keine neue Planung.
+
+Bis zu acht aktuelle Künstler-Feedbacks samt Song und Richtung werden nur im
+Arbeitsspeicher gehalten und bei der nächsten Planung an Claude übergeben.
+Ein Gegenfeedback ersetzt die vorherige Entscheidung. Erneutes Wählen von
+Standard, eine AI-Anfrage oder ein Neustart löscht das Feedback. Es werden
+keine dauerhaften Lerngewichte, Präferenzdateien oder AI-Künstlerpools verändert.
+
 ## AI-Modus: spontane Wünsche
 
 Anfragen im Dashboard funktionieren auf Deutsch, Englisch und gemischt. Alternativ:

@@ -1102,10 +1102,11 @@ def service_personal_director():
     snapshot.tracks = [t for t in snapshot.tracks if personal_track_allowed(t)]
     history, recent = list(personal_director.history), list(personal_director.recent)
     feedback = personal_director.validation_feedback
+    preferences = copy.deepcopy(list(personal_director.preferences.values()))
     def job(cancelled):
         print('  Standard: KI plant den nächsten Musikabschnitt im Hintergrund.', flush=True)
         return plan_personal_block(snapshot, history, recent, connect,
-            lambda ts: select_best_tracks(ts, allow_compilations=True), cancelled, feedback)
+            lambda ts: select_best_tracks(ts, allow_compilations=True), cancelled, feedback, preferences)
     jobs.start(job, 0)
 
 
@@ -1441,6 +1442,20 @@ def track_finished(allow_early=False):
 # MAIN DJ LOOP
 # =====================
 
+def standard_feedback(positive):
+    global _prepared_next
+    if auto_mode != 'global' or not tracker.control or not now_playing.get('confirmed'):
+        status('Feedback ist nur für einen bestätigten Song im Standard-Mix verfügbar')
+        return False
+    if not personal_director.feedback(positive, personal_director.current_track):
+        return False
+    _prepared_next = None
+    now_playing['preparation_attempted'] = False
+    print('  Standard: ' + ('Mehr davon' if positive else 'Weniger davon') +
+          ' für diese Session vorgemerkt; der aktuelle Song läuft weiter.')
+    return True
+
+
 def run_dj():
     global current_pool, auto_mode, _pending_selection, _prepared_next, ai_last_artist
     global ai_request_plan, ai_request_tracks_ready, ai_song_cycle
@@ -1466,6 +1481,9 @@ def run_dj():
             if choice == "quit":
                 print("DJ shutting down via hotkey.")
                 sys.exit(0)
+
+            elif choice in ('feedback-more', 'feedback-less'):
+                standard_feedback(choice == 'feedback-more')
 
             elif choice == "skip":
                 log_section("Skip")

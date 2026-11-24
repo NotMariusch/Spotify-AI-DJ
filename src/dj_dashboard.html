@@ -517,6 +517,8 @@
   </div>
   <div class="divider"></div>
   <button class="btn skip" onclick="sendCmd('skip')">⏭ Skip</button>
+  <button class="btn" id="feedback-more" hidden onclick="sendCmd('feedback-more')" title="Ähnliche Musik in dieser Standard-Session bevorzugen">＋ Mehr davon</button>
+  <button class="btn" id="feedback-less" hidden onclick="sendCmd('feedback-less')" title="Ab dem nächsten Song eine andere Richtung; keine dauerhafte Sperre">− Weniger davon</button>
   <button class="btn ban"  onclick="sendCmd('ban-artist')">✕ Ban Artist</button>
   <button class="btn ban"  onclick="sendCmd('ban')">✕ Ban Track</button>
   <button class="btn quit" onclick="sendCmd('quit')">Quit DJ</button>
@@ -660,6 +662,9 @@
 
   socket.on("state", (s) => {
     renderCosts(s.ai_costs);
+    for (const id of ['feedback-more', 'feedback-less']) {
+      document.getElementById(id).hidden = s.mode !== 'Standard';
+    }
     shuttingDown = Boolean(s.shutting_down);
     progressSample = progressSampleFromState(s, progressSample, performance.now());
     renderProgress();

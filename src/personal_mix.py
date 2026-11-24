@@ -1,7 +1,7 @@
 """Spotify-based personal selection, process-local and independent of learning."""
 import random
 import time
-from collections import Counter
+from collections import Counter, deque
 
 from music_request import artist_key, song_key, recording_isrc
 
@@ -35,6 +35,7 @@ class PersonalMix:
         self.plays = Counter()
         self.last_artist = None
         self.last_track = None
+        self.recent_artists = deque(maxlen=12)
 
     def load(self, spotify, qualify, excluded_recent=(), now=None):
         now = time.monotonic() if now is None else now
@@ -68,7 +69,7 @@ class PersonalMix:
         self.sources = memberships
         return True
 
-    def choose(self, allowed, tracks=None):
+    def choose(self, allowed, tracks=None, artist_bias=None):
         candidates = [t for t in (self.tracks if tracks is None else tracks) if allowed(t)]
         if not candidates:
             return None
@@ -78,9 +79,12 @@ class PersonalMix:
         candidates = diverse or candidates
         minimum = min(self.plays[identity(t)] for t in candidates)
         candidates = [t for t in candidates if self.plays[identity(t)] == minimum]
-        return random.choices(candidates, weights=[self.scores.get(identity(t), 1) for t in candidates], k=1)[0]
+        return random.choices(candidates, weights=[self.scores.get(identity(t), 1) /
+            (1 + 2 * self.recent_artists.count(identity(t)[0])) *
+            (artist_bias or {}).get(identity(t)[0], 1) for t in candidates], k=1)[0]
 
     def record_start(self, track):
         key = identity(track)
         self.plays[key] += 1
         self.last_track, self.last_artist = key, key[0]
+        self.recent_artists.append(key[0])

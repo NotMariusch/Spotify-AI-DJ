@@ -28,6 +28,91 @@ def response(kind='recent', artist='B', title='Recent'):
 
 
 class PersonalDirectorTests(unittest.TestCase):
+    def test_feedback_is_temporary_invalidates_queue_and_is_idempotent(self):
+        p, d = pool(), director.PersonalDirector()
+        chosen = d.choose(p, lambda _: True)
+        d.confirm(chosen)
+        d.queued = director.MusicBlock('discovery', 'Old', 'Old', [track('Old')])
+        generation = d.jobs.generation
+        self.assertTrue(d.feedback(False, chosen))
+        self.assertIsNone(d.queued)
+        self.assertIsNone(d.proposal)
+        self.assertEqual(d.active.played, d.BLOCK_SIZE)
+        self.assertGreater(d.jobs.generation, generation)
+        generation = d.jobs.generation
+        self.assertFalse(d.feedback(False, chosen))
+        self.assertEqual(d.jobs.generation, generation)
+        self.assertTrue(d.feedback(True, chosen))
+        self.assertEqual(d.preferences[identity(chosen)[0]]['preference'], 'more')
+        d.reset()
+        self.assertEqual(d.preferences, {})
+
+    def test_less_prefers_other_artist_but_small_pool_does_not_stall(self):
+        p, d = pool(), director.PersonalDirector()
+        d.preferences = {'a': dict(preference='less')}
+        self.assertEqual(d.select(p, lambda _: True, p.tracks)['artists'][0]['name'], 'B')
+        self.assertEqual(d.select(p, lambda _: True, p.tracks[:1])['artists'][0]['name'], 'A')
+
+    def test_standard_feedback_does_not_start_music_or_touch_ai(self):
+        d = director.PersonalDirector()
+        p = pool()
+        chosen = d.choose(p, lambda _: True)
+        d.confirm(chosen)
+        with patch.object(dj, 'personal_director', d), patch.object(dj, 'auto_mode', 'ai'), \
+             patch.object(dj, 'status'), patch.object(dj, 'now_playing', {'confirmed': True}), \
+             patch.object(dj, '_prepared_next', {'old': True}), patch.object(dj, 'sp') as sp, \
+             patch.object(dj.tracker, 'control', True):
+            self.assertFalse(dj.standard_feedback(False))
+            self.assertEqual(d.preferences, {})
+            with patch.object(dj, 'auto_mode', 'global'):
+                self.assertTrue(dj.standard_feedback(False))
+            self.assertIsNone(dj._prepared_next)
+            self.assertTrue(dj.now_playing['confirmed'])
+            sp.start_playback.assert_not_called()
+
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-only'})
+    def test_planning_cadence_and_session_feedback_without_extra_calls(self):
+        for history, kind in [([{'kind': 'favorites'}, {'kind': 'recent'}], 'discovery'),
+                              ([{'kind': 'discovery'}, {'kind': 'favorites'}], 'recent')]:
+            data = response(kind, 'C', 'New') if kind == 'discovery' else response()
+            data['direction'] = 'Treibende Gitarren mit großen Refrains'
+            preferences = [dict(artist='A', title='Top', preference='less', direction='Ruhiger Pop')]
+            with patch.object(director, '_request_model', return_value=data) as model, \
+                 patch.object(director, 'resolve_artists_to_ids', return_value=[('C', 'id')]), \
+                 patch.object(director, 'resolve_song_wishes', return_value=([('C', track('New', 'C'))], [])):
+                block = director.plan_personal_block(pool(), history, [], Mock(), lambda ts: ts,
+                    threading.Event(), preferences=preferences)
+            model.assert_called_once()
+            context = json.loads(json.loads(model.call_args.args[0])['messages'][0]['content'])
+            self.assertEqual(context['allowed_kinds'], [kind])
+            self.assertEqual(context['session_feedback'], preferences)
+            self.assertIn('KI-Richtung:', block.intro)
+            self.assertEqual(block.direction, data['direction'])
+
+    def test_discovery_uses_no_more_than_two_anchors(self):
+        data = response('discovery')
+        data['songs'] = [dict(artist=f'New{i}', title=f'New{i}', based_on=i, reason='Treibt mit verzerrten Gitarren') for i in range(3)]
+        evidence = [dict(artist=f'A{i}', title=f'T{i}', sources=['recent']) for i in range(3)]
+        result = director.validate_block(data, evidence, ['discovery'], [])
+        self.assertEqual(len(result[3]), 2)
+
+    def test_artist_rotation_downweights_recent_artists_without_changing_scores(self):
+        p = pool()
+        p.recent_artists.extend(['a', 'a'])
+        with patch('personal_mix.random.choices', return_value=[p.tracks[1]]) as choose:
+            p.choose(lambda _: True)
+        self.assertEqual(choose.call_args.kwargs['weights'], [.2, 1])
+        self.assertEqual(p.scores, {})
+
+    def test_feedback_chat_aliases_are_standard_only(self):
+        import dj_server
+        with patch.dict(dj_server.state, mode='Standard'), patch.object(dj_server, 'send_command') as send:
+            dj_server.handle_command({'cmd': 'Weniger davon!'})
+            send.assert_called_once_with('feedback-less')
+        with patch.dict(dj_server.state, mode='AI'), patch.object(dj_server, 'send_command') as send:
+            dj_server.handle_command({'cmd': 'mehr davon'})
+            send.assert_called_once_with('ai:mehr davon')
+
     def test_two_song_block_moves_on_without_filling_four_starts(self):
         p, d = pool(), director.PersonalDirector()
         d.queued = director.MusicBlock('discovery', 'Short', 'Short', [track('Bones', 'A'), track('Patrick', 'B')])

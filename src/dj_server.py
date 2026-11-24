@@ -328,6 +328,14 @@ def handle_command(data):
         return
 
     mode_labels = {"5": "Standard"}
+    feedback_aliases = {'mehr davon': 'feedback-more', 'more like this': 'feedback-more',
+                        'weniger davon': 'feedback-less', 'less like this': 'feedback-less'}
+    if state.get('mode') == 'Standard':
+        cmd = feedback_aliases.get(cmd.casefold().strip(' .!'), cmd)
+    if cmd in ('feedback-more', 'feedback-less'):
+        if state.get('mode') == 'Standard':
+            send_command(cmd)
+        return
 
     if cmd in ("ai-mode", "1", "2", "3", "4"):
         return  # UI-only, no action
