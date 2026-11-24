@@ -100,8 +100,8 @@ test('dashboard updates bar and accessibility labels, clears on disconnect', () 
   assert.equal(log[0].className, 'log-line section');
   assert.equal(log[0].textContent, 'Modus: German Trap');
   assert.equal(log[1].textContent, 'Neuer Song');
-  assert.equal(log[2].className, 'log-line dj-pick');
-  assert.equal(log[3].className, 'log-line filter');
+  assert.equal(log[2].className, 'log-line detail');
+  assert.equal(log[3].className, 'log-line detail');
   handlers.state({ shutting_down: true, status: 'DJ und Dashboard werden beendet' });
   handlers.disconnect();
   assert.match(element('dj-status').textContent, /DJ und Dashboard beendet/);

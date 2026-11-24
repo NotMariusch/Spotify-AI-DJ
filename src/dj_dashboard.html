@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -211,6 +211,45 @@
     text-transform: uppercase;
   }
   .log-line.section:first-child { margin-top: 0; }
+  .log-line.dj-pick { color: #65df92; padding: 9px 12px; margin: 8px 0; border-left: 3px solid #65df92; background: #122219; border-radius: 4px; }
+  .log-line.block { color: #c4b5fd; }
+  .log-line.ready { color: #7dd3fc; padding: 5px 0; }
+  .log-line.warning { color: #fcd34d; border-left: 3px solid #f59e0b; padding: 8px 12px; margin: 6px 0; background: #292113; }
+  .log-line.error { color: #fda4af; border-left: 3px solid #fb7185; padding: 8px 12px; margin: 6px 0; background: #2a171d; }
+  .log-line.state { color: #a5d8ff; padding: 6px 0; }
+  .log-line.detail { color: #9b9bb3; font-size: 11px; }
+  #dj-log:not(.show-details) .detail { display: none; }
+  .log-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 11px; color: #b7b7ca; }
+  .log-tools .details-toggle {
+    position: relative; margin-left: auto; display: inline-flex; align-items: center;
+    gap: 10px; padding: 7px 10px; border: 1px solid #353542; border-radius: 8px;
+    background: #19191f; color: #b7b7ca; cursor: pointer; user-select: none;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .details-toggle:hover { background: #22212b; border-color: #696079; color: #e8e8f0; }
+  .details-toggle input {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: 0;
+    opacity: 0; overflow: hidden;
+  }
+  .details-toggle:focus-within { outline: 2px solid #c4b5fd; outline-offset: 3px; }
+  .details-toggle .toggle-track {
+    position: relative; flex-shrink: 0; width: 30px; height: 18px;
+    border: 1px solid #5b5b6d; border-radius: 20px; background: #30303c;
+    transition: background .15s, border-color .15s;
+  }
+  .details-toggle .toggle-track::after {
+    content: ''; position: absolute; top: 3px; left: 3px; width: 10px; height: 10px;
+    border-radius: 50%; background: #b7b7ca; transition: transform .15s, background .15s;
+  }
+  .details-toggle input:checked ~ .toggle-track { background: #8b5cf6; border-color: #a78bfa; }
+  .details-toggle input:checked ~ .toggle-track::after { transform: translateX(12px); background: #fff; }
+  .details-toggle input:checked ~ .toggle-label { color: #ddd6fe; }
+  @media (prefers-reduced-motion: reduce) {
+    .details-toggle, .details-toggle .toggle-track, .details-toggle .toggle-track::after { transition: none; }
+  }
+  .log-key-song { color: #65df92; }
+  .log-key-block { color: #c4b5fd; }
+  .log-key-warning { color: #fcd34d; }
 
   .hotkey-help {
     flex-shrink: 0;
@@ -347,6 +386,16 @@
 <main>
   <div class="panel">
     <div class="panel-header"><div class="dot"></div><span id="dj-status">Warte auf DJ</span></div>
+    <div class="log-tools" aria-label="Log-Anzeige">
+      <span class="log-key-song">♫ Song</span>
+      <span class="log-key-block">Abschnitt</span>
+      <span class="log-key-warning">⚠ Hinweis</span>
+      <label class="details-toggle">
+        <input type="checkbox" role="switch" id="log-details" onchange="toggleLogDetails(this.checked)">
+        <span class="toggle-track" aria-hidden="true"></span>
+        <span class="toggle-label">Details anzeigen</span>
+      </label>
+    </div>
     <div class="log" id="dj-log"></div>
     <aside class="hotkey-help" aria-label="Hotkeys">
       <div class="hotkey-title">Hotkeys · F13 = rechte Strg</div>
@@ -503,7 +552,7 @@
       const div = document.createElement("div");
       const category = classifier(line);
       div.className   = "log-line " + category;
-      div.textContent = category === "section" ? line.slice(4, -4) : line;
+      div.textContent = /^--- .+ ---$/.test(line) ? line.slice(4, -4) : line;
       el.appendChild(div);
     });
     while (el.children.length > MAX_LINES) el.removeChild(el.firstChild);
@@ -511,16 +560,25 @@
   }
 
   function classifyDJ(line) {
-    const l = line.toLowerCase();
-    if (/^--- .+ ---$/.test(line))                   return "section";
-    if (/^dj ->|^global dj ->/.test(l))              return "dj-pick";
-    if (/weight \[/.test(line))                       return "weight";
-    if (/ai request|ai suggested|ai artist|ai interpretation|ai year evidence|ai session/.test(l)) return "ai-line";
-    if (/discovery|graduated|trial play/.test(l))    return "discovery";
-    if (/error|failed|exception|traceback/.test(l))  return "error";
-    if (/track finished|track near end|playback resumed/.test(l)) return "track-end";
-    if (/fetched[=:]|after filter:|after recent filter:|after ban filter:|device:/.test(l)) return "filter";
+    const l = line.trim().toLowerCase();
+    // Keep raw SDK noise and per-candidate searches available without repeating them in the overview.
+    if (/^ai artist|^your application has reached a rate\/request limit|^max retries reached/.test(l)) return "detail";
+    if (/startdiagnose|nicht bestätigt|fehlgeschlagen|fehler|timeouterror|zeitüberschreitung|traceback|exception|\berror\b|\bfailed\b/.test(l)) return "error";
+    if (/rate.limit|http 429|blockplanung|keine passenden|kein passender|keine ungesperrten|automatische planung beendet|übersprungen|ausgelassen|playback-daten|freigegeben|neuer dj-befehl erforderlich|braucht spotify-leserechte/.test(l)) return "warning";
+    if (/^--- neuer song ---$|^(?:standard dj|global dj|dj) ->|^track finished|^track near end|^skip hotkey/.test(l)) return "detail";
+    if (/^--- standard:/.test(l)) return "section block";
+    if (/^--- .+ ---$/.test(l)) return "section";
+    if (/^standard: nächster abschnitt vorbereitet/.test(l)) return "ready";
+    if (/pausiert|fortsetzen|gerätewechsel|wiedergabe.*freigegeben/.test(l)) return "state";
+    if (/^standard: ki plant|netzwerk-zeitlimit|^ai suggested|^ai session|^ai year evidence|spotify-katalogfassung|fetched[=:]|after filter:|after recent filter:|after ban filter:|device:/.test(l)) return "detail";
+    if (/^ai request|^ai interpretation|^ai wartet/.test(l)) return "ai-line";
+    if (/^standard:|^wir hören|^aus deinem|^aus deinen|^zum entdecken|^weiter mit/.test(l)) return "block";
+    if (line.includes(' — ')) return "dj-pick";
     return "";
+  }
+
+  function toggleLogDetails(show) {
+    document.getElementById('dj-log').classList.toggle('show-details', show);
   }
 
   function classifyVoice(line) {

@@ -39,6 +39,12 @@ Das Dashboard zeigt Künstler, Titel, Modus, Status und eine Fortschrittsleiste.
 Die Leiste dient nur zur Anzeige, nicht zum Spulen. Logs trennen unter anderem
 neue Songs, Moduswechsel und AI-Anfragen; interne Playback-Telemetrie wird nicht
 als Konsolentext ausgegeben.
+Die Übersicht hebt Songs grün, Abschnitte violett, vorbereitete Abschnitte blau,
+Warnungen gelb und Fehler rot hervor. Songs erhalten eine eigene hervorgehobene
+Zeile. Künstlersuchen, doppelte Startmeldungen und technische Übergangsdetails
+sind standardmäßig ausgeblendet; „Details anzeigen“ blendet die im Logpuffer
+vorhandenen Originalmeldungen wieder ein. Rate-Limits, fehlgeschlagene Starts
+und Freigaben der DJ-Steuerung bleiben in der Übersicht sichtbar.
 
 ## Einrichtung unter Windows
 
