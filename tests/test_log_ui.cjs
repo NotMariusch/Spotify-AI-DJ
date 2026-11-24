@@ -5,6 +5,22 @@ const vm = require('node:vm');
 const html = fs.readFileSync(require('node:path').join(__dirname, '../src/dj_dashboard.html'), 'utf8');
 const code = html.slice(html.indexOf('  function appendLines('), html.indexOf('  function classifyVoice('));
 
+test('English UI status and local SVG icon preserve German log content', () => {
+  const context = vm.createContext({});
+  vm.runInContext(html.slice(html.indexOf('  function dashboardStatus('), html.indexOf('  function renderProgress(')), context);
+  assert.equal(context.dashboardStatus('DJ aktiv'), 'DJ active');
+  assert.equal(context.dashboardStatus('Pausiert; auf Fortsetzen in Spotify warten'), 'Paused · resume in Spotify');
+  assert.match(context.dashboardStatus('AI wartet auf deine Antwort: Welchen Song?'), /Your input is needed/);
+  assert.match(context.dashboardStatus('Spotify Rate-Limit (HTTP 429): 30s warten'), /wait 30s/);
+  assert.ok(html.includes('<html lang="en">'));
+  const icon = html.match(/rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,([^"]+)"/);
+  assert.ok(icon);
+  assert.match(decodeURIComponent(icon[1]), /viewBox="0 0 64 64"/);
+  const { context: c, entries } = setup();
+  c.appendLines('dj-log', ['Wir hören jetzt deine Favoriten.'], c.classifyDJ);
+  assert.equal(entries[0].textContent, 'Wir hören jetzt deine Favoriten.');
+});
+
 function setup() {
   const entries = [];
   const classes = new Set();
@@ -24,7 +40,10 @@ test('new Standard messages have distinct semantic colors', () => {
     ['NF — HOPE', 'dj-pick'],
     ['--- Standard: Deine Favoriten ---', 'section block'],
     ['Standard: nächster Abschnitt vorbereitet — Entdeckungen: KSI (1 Titel).', 'ready'],
-    ['Pausiert; auf Fortsetzen in Spotify warten', 'state'],
+    ['Pausiert; auf Fortsetzen in Spotify warten', 'detail'],
+    ['Spotify Wiedergabe pausiert', 'detail'],
+    ['Pause nicht bestätigt, bitte Spotify prüfen', 'error'],
+    ['AI-Katalogvorbereitung durch Rate-Limit pausiert; nach Wartezeit erneut starten', 'warning'],
     ['Spotify Rate-Limit (HTTP 429): 30s warten', 'warning'],
     ['Playback-Daten vorübergehend unbekannt', 'warning'],
     ['Manueller oder unklarer Wechsel; DJ freigegeben bis zum nächsten DJ-Befehl', 'warning'],
@@ -67,17 +86,17 @@ test('cost display shows USD and flags unknown charges instead of pretending zer
   vm.createContext(context);
   vm.runInContext(code, context);
   context.renderCosts({ available: true, active: true, session_usd: .0105, total_usd: .1234, unknown: 0 });
-  assert.equal(elements['cost-session'].textContent, '0,01 USD');
-  assert.equal(elements['cost-total'].textContent, '0,12 USD');
+  assert.equal(elements['cost-session'].textContent, '0.01 USD');
+  assert.equal(elements['cost-total'].textContent, '0.12 USD');
   context.renderCosts({ available: true, active: true, session_usd: .001, total_usd: .001, remaining_usd: 23.4999, unknown: 0 });
-  assert.equal(elements['cost-session'].textContent, '0,00 USD');
-  assert.equal(elements['cost-remaining'].textContent, '23,50 USD');
+  assert.equal(elements['cost-session'].textContent, '0.00 USD');
+  assert.equal(elements['cost-remaining'].textContent, '23.50 USD');
   context.renderCosts({ available: true, active: true, remaining_usd: -.014, unknown: 0 });
-  assert.equal(elements['cost-remaining'].textContent, '-0,01 USD');
+  assert.equal(elements['cost-remaining'].textContent, '-0.01 USD');
   context.renderCosts({ available: true, active: true, session_usd: .01, total_usd: .12, unknown: 2 });
-  assert.match(elements['cost-note'].textContent, /Unvollständig.*2/);
+  assert.match(elements['cost-note'].textContent, /Incomplete.*2/);
   context.renderCosts({ available: false });
   assert.equal(elements['cost-total'].textContent, '—');
   context.renderCosts({ available: true, active: false });
-  assert.match(elements['cost-note'].textContent, /DJ-Neustart/);
+  assert.match(elements['cost-note'].textContent, /DJ restart/);
 });

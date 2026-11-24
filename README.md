@@ -48,21 +48,25 @@ und Freigaben der DJ-Steuerung bleiben in der Übersicht sichtbar.
 
 ## KI-Kosten im Dashboard
 
+Die Oberfläche ist auf Englisch; DJ-Meldungen im Log bleiben auf Deutsch.
+Ein eingebettetes SVG-Tab-Icon funktioniert auch auf localhost, ohne externe
+Bildanfrage.
+
 Die dezente Leiste unten zeigt **Session** und **Overall**. Über **Look** oben
 rechts lässt sich ein eigenes Hintergrundbild wählen (JPG, PNG oder WebP bis
 2 MB). Es wird abgedunkelt dargestellt und nur im jeweiligen Browser gespeichert,
-nicht auf den Server hochgeladen. **Zurück zum Verlauf** entfernt das Bild wieder.
+nicht auf den Server hochgeladen. **Reset background** entfernt das Bild wieder.
 
 Die Kostenleiste zeigt berechnete **USD-Beträge** für die laufende DJ-Session
 und insgesamt seit Aktivierung der Erfassung bzw. der letzten Guthaben-Eingabe.
-Alle drei Anzeigen (**Session**, **Overall**, **Rest ≈**) verwenden zwei
+Alle drei Anzeigen (**Session**, **Overall**, **Balance ≈**) verwenden zwei
 Nachkommastellen; intern werden kleine Beträge ohne diese Rundung aufsummiert.
 Die Session beginnt beim DJ-Start;
 der Gesamtbetrag bleibt in `data/ai_costs.json` erhalten. Frühere Aufrufe vor
 Einführung dieser Funktion können nicht nachträglich erfasst werden.
 
-Über **Guthaben** lässt sich der aktuelle Anthropic-Kontostand in USD eingeben
-(Punkt oder Komma, maximal zwei Nachkommastellen). **Speichern & zurücksetzen**
+Über **Set balance** lässt sich der aktuelle Anthropic-Kontostand in USD eingeben
+(Punkt oder Komma, maximal zwei Nachkommastellen). **Save & reset**
 setzt Session und Overall sichtbar auf null. Die bisherigen Kostendaten bleiben
 erhalten; der Ausgangswert wird separat in `data/ai_balance.json` gespeichert.
 Das geschätzte Restguthaben sinkt mit den danach erfassten Kosten und bleibt
@@ -279,8 +283,8 @@ Die Künstler der letzten zwölf bestätigten Starts erhalten bei der Auswahl
 weniger Vorrang; direkte Wiederholungsvermeidung und ungespielte Songs bleiben
 vorrangig. Diese Rotation gilt nur für Standard.
 
-Während Standard aktiv ist, zeigt das Dashboard **Mehr davon** und
-**Weniger davon**. Auch die eigenständigen Chat-Nachrichten „mehr davon“ /
+Während Standard aktiv ist, zeigt das Dashboard **More** und
+**Less**. Auch die eigenständigen Chat-Nachrichten „mehr davon“ /
 „weniger davon“ oder „more like this“ / „less like this“ funktionieren.
 Im AI-Modus bleiben solche Texte gewöhnliche AI-Folgeanfragen.
 

@@ -214,17 +214,19 @@ def voice_log_endpoint():
 @app.route('/ai_balance', methods=['POST'])
 def balance_endpoint():
     if request.headers.get('Origin') not in (None, request.host_url.rstrip('/')):
-        return {'error': 'Zugriff nicht erlaubt.'}, 403
+        return {'error': 'Access denied.'}, 403
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return {'error': 'Ungültige Eingabe.'}, 400
+        return {'error': 'Invalid input.'}, 400
     from ai_costs import set_balance, dashboard_costs
     try:
         set_balance(payload.get('amount'))
     except ValueError as error:
-        return {'error': str(error)}, 400
+        message = ('Cost tracking is not available yet. Please restart the DJ.' if 'Kostenerfassung' in str(error)
+                   else 'Enter a USD amount with up to two decimal places.')
+        return {'error': message}, 400
     except OSError:
-        return {'error': 'Guthaben konnte nicht gespeichert werden.'}, 503
+        return {'error': 'Could not save balance.'}, 503
     return {'ai_costs': dashboard_costs()}
 
 

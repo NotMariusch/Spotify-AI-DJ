@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SpotifyDJ</title>
+<title>DJctrl · Spotify DJ</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2216%22%20fill%3D%22%2311151e%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%2221%22%20fill%3D%22none%22%20stroke%3D%22%231db954%22%20stroke-width%3D%226%22%2F%3E%3Cpath%20d%3D%22M32%2011a21%2021%200%200%201%2021%2021%22%20fill%3D%22none%22%20stroke%3D%22%23a78bfa%22%20stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%227%22%20fill%3D%22%23a78bfa%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%222%22%20fill%3D%22%2311151e%22%2F%3E%3C%2Fsvg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 <style>
@@ -425,17 +426,17 @@
 <div class="dashboard-backdrop" id="dashboard-backdrop" aria-hidden="true"></div>
 
 <header>
-  <div class="logo">DJ<span>ctrl</span></div>
+  <div class="logo"><img src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2216%22%20fill%3D%22%2311151e%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%2221%22%20fill%3D%22none%22%20stroke%3D%22%231db954%22%20stroke-width%3D%226%22%2F%3E%3Cpath%20d%3D%22M32%2011a21%2021%200%200%201%2021%2021%22%20fill%3D%22none%22%20stroke%3D%22%23a78bfa%22%20stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%227%22%20fill%3D%22%23a78bfa%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%222%22%20fill%3D%22%2311151e%22%2F%3E%3C%2Fsvg%3E" width="24" height="24" alt="" style="vertical-align:middle;margin-right:8px">DJ<span>ctrl</span></div>
   <div class="now-playing">
     <span class="np-label">Now</span>
     <span class="np-artist" id="now-artist">—</span>
     <span class="np-sep" id="now-sep" style="display:none">—</span>
     <span class="np-track" id="now-track"></span>
   </div>
-  <div class="playback-progress is-stale" id="playback-progress" title="Keine Playback-Daten">
+  <div class="playback-progress is-stale" id="playback-progress" title="No playback data">
     <span class="progress-time" id="progress-elapsed">--:--</span>
     <div class="progress-rail" id="progress-rail" role="progressbar"
-         aria-label="Songfortschritt" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Keine Playback-Daten">
+         aria-label="Track progress" aria-valuemin="0" aria-valuemax="100" aria-valuetext="No playback data">
       <div class="progress-fill" id="progress-fill"></div>
     </div>
     <span class="progress-time" id="progress-duration">--:--</span>
@@ -447,56 +448,57 @@
   <details class="appearance">
     <summary>◐ Look</summary>
     <div class="appearance-menu">
-      <strong>Dein Hintergrund</strong>
-      <p>Ein eigenes Bild, sanft ausgeblendet. Bleibt nur in diesem Browser gespeichert.</p>
-      <input id="background-file" type="file" accept="image/jpeg,image/png,image/webp" aria-label="Hintergrundbild auswählen">
-      <button class="btn" id="background-reset" type="button">Zurück zum Verlauf</button>
-      <p id="background-status" role="status">JPG, PNG oder WebP · maximal 2 MB</p>
+      <strong>Your background</strong>
+      <p>Your own image, softly faded. Saved only in this browser.</p>
+      <label class="btn" for="background-file" style="display:inline-block;margin-bottom:12px">Choose image</label>
+      <input id="background-file" type="file" accept="image/jpeg,image/png,image/webp" aria-label="Choose a background image" style="position:absolute;width:1px;height:1px;opacity:0">
+      <button class="btn" id="background-reset" type="button">Reset background</button>
+      <p id="background-status" role="status">JPG, PNG or WebP · up to 2 MB</p>
     </div>
   </details>
 </header>
 
 <main>
   <div class="panel">
-    <div class="panel-header"><div class="dot"></div><span id="dj-status">Warte auf DJ</span></div>
-    <div class="log-tools" aria-label="Log-Anzeige">
+    <div class="panel-header"><div class="dot"></div><span id="dj-status">Waiting for DJ</span></div>
+    <div class="log-tools" aria-label="Log display">
       <span class="log-key-song">♫ Song</span>
-      <span class="log-key-block">Abschnitt</span>
-      <span class="log-key-warning">⚠ Hinweis</span>
+      <span class="log-key-block">Block</span>
+      <span class="log-key-warning">⚠ Notice</span>
       <label class="details-toggle">
         <input type="checkbox" role="switch" id="log-details" onchange="toggleLogDetails(this.checked)">
         <span class="toggle-track" aria-hidden="true"></span>
-        <span class="toggle-label">Details anzeigen</span>
+        <span class="toggle-label">Show details</span>
       </label>
     </div>
     <div class="log" id="dj-log"></div>
     <aside class="hotkey-help" aria-label="Hotkeys">
-      <div class="hotkey-title">Hotkeys · F13 = rechte Strg</div>
+      <div class="hotkey-title">Hotkeys · F13 = right Ctrl</div>
       <ul class="hotkey-list">
         <li><kbd>F13 + 1</kbd> = Standard</li>
         <li><kbd>F13 + 2</kbd> = Skip</li>
-        <li><kbd>F13 + 3</kbd> = Künstler sperren</li>
-        <li><kbd>F13 + 4</kbd> = Song sperren</li>
-        <li><kbd>F13 + 5</kbd> = DJ beenden</li>
-        <li><kbd>F13 + V</kbd> = Sprachaufnahme starten/stoppen</li>
+        <li><kbd>F13 + 3</kbd> = Ban artist</li>
+        <li><kbd>F13 + 4</kbd> = Ban track</li>
+        <li><kbd>F13 + 5</kbd> = Quit DJ</li>
+        <li><kbd>F13 + V</kbd> = Start/stop voice recording</li>
       </ul>
     </aside>
-    <div class="ai-costs" title="Berechnete USD-Kosten. Restguthaben geschätzt aus deiner letzten Eingabe; kein Live-Kontostand von Anthropic.">
-      <span>KI-Kosten ≈</span>
+    <div class="ai-costs" title="Estimated USD costs. Balance calculated from your last entry; not a live Anthropic account balance.">
+      <span>AI costs ≈</span>
       <span>Session <strong id="cost-session">—</strong></span>
       <span>Overall <strong id="cost-total">—</strong></span>
-      <span>Rest ≈ <strong id="cost-remaining">—</strong></span>
+      <span>Balance ≈ <strong id="cost-remaining">—</strong></span>
       <details class="balance-editor">
-        <summary>Guthaben</summary>
+        <summary>Set balance</summary>
         <form class="appearance-menu" id="balance-form">
-          <label for="balance-amount"><strong>Aktuelles Guthaben (USD)</strong></label>
-          <p>Deinen Kontostand von Anthropic eingeben. Session und Overall starten beim Speichern wieder bei null.</p>
-          <input class="ai-input" id="balance-amount" type="text" inputmode="decimal" placeholder="23,00" maxlength="9" required autocomplete="off">
-          <button class="send-btn" id="balance-save" type="submit">Speichern & zurücksetzen</button>
-          <p id="balance-status" role="status">Restguthaben ist geschätzt. Andere Apps und Aufladungen werden nicht automatisch erfasst.</p>
+          <label for="balance-amount"><strong>Current balance (USD)</strong></label>
+          <p>Enter your current Anthropic balance. Saving resets Session and Overall to zero.</p>
+          <input class="ai-input" id="balance-amount" type="text" inputmode="decimal" placeholder="23.00" maxlength="9" autocomplete="off">
+          <button class="send-btn" id="balance-save" type="submit">Save & reset</button>
+          <p id="balance-status" role="status">Balance is estimated. Other apps and top-ups are not tracked automatically.</p>
         </form>
       </details>
-      <span class="cost-note" id="cost-note">Warte auf Kostendaten</span>
+      <span class="cost-note" id="cost-note">Waiting for cost data</span>
     </div>
   </div>
   <div class="panel" style="flex-direction:column;display:flex;overflow:hidden;">
@@ -517,8 +519,8 @@
   </div>
   <div class="divider"></div>
   <button class="btn skip" onclick="sendCmd('skip')">⏭ Skip</button>
-  <button class="btn" id="feedback-more" hidden onclick="sendCmd('feedback-more')" title="Ähnliche Musik in dieser Standard-Session bevorzugen">＋ Mehr davon</button>
-  <button class="btn" id="feedback-less" hidden onclick="sendCmd('feedback-less')" title="Ab dem nächsten Song eine andere Richtung; keine dauerhafte Sperre">− Weniger davon</button>
+  <button class="btn" id="feedback-more" hidden onclick="sendCmd('feedback-more')" title="Prefer similar music in this Standard session">＋ More</button>
+  <button class="btn" id="feedback-less" hidden onclick="sendCmd('feedback-less')" title="Change direction after this track; not a permanent ban">− Less</button>
   <button class="btn ban"  onclick="sendCmd('ban-artist')">✕ Ban Artist</button>
   <button class="btn ban"  onclick="sendCmd('ban')">✕ Ban Track</button>
   <button class="btn quit" onclick="sendCmd('quit')">Quit DJ</button>
@@ -541,7 +543,7 @@
     const status = document.getElementById('background-status');
     if (!file) return;
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 2 * 1024 * 1024) {
-      status.textContent = 'Bitte JPG, PNG oder WebP bis 2 MB wählen.';
+      status.textContent = 'Please choose a JPG, PNG or WebP image up to 2 MB.';
       event.target.value = '';
       return;
     }
@@ -558,9 +560,9 @@
       if (revision !== backgroundRevision) return;
       localStorage.setItem(BACKGROUND_KEY, value);
       applyBackground(value);
-      status.textContent = 'Hintergrund gespeichert.';
+      status.textContent = 'Background saved.';
     } catch (_) {
-      if (revision === backgroundRevision) status.textContent = 'Bild konnte nicht geladen oder gespeichert werden. Bitte ein kleineres Bild versuchen.';
+      if (revision === backgroundRevision) status.textContent = 'Could not load or save the image. Please try a smaller image.';
     }
     event.target.value = '';
   });
@@ -569,9 +571,9 @@
     try {
       localStorage.removeItem(BACKGROUND_KEY);
       applyBackground(null);
-      document.getElementById('background-status').textContent = 'Standard-Verlauf wiederhergestellt.';
+      document.getElementById('background-status').textContent = 'Default background restored.';
     } catch (_) {
-      document.getElementById('background-status').textContent = 'Browser-Speicher ist nicht verfügbar.';
+      document.getElementById('background-status').textContent = 'Browser storage is unavailable.';
     }
   });
   const socket = io();
@@ -581,24 +583,24 @@
     const status = document.getElementById('balance-status');
     const button = document.getElementById('balance-save');
     if (!/^\d{1,6}([.,]\d{1,2})?$/.test(input.value.trim())) {
-      status.textContent = 'Bitte einen USD-Betrag mit maximal zwei Nachkommastellen eingeben.';
+      status.textContent = 'Enter a USD amount with up to two decimal places.';
       return;
     }
     button.disabled = true;
-    status.textContent = 'Wird gespeichert …';
+    status.textContent = 'Saving …';
     try {
       const response = await fetch('/ai_balance', { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: input.value.trim() }),
         signal: AbortSignal.timeout(10000) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Speichern fehlgeschlagen.');
+      if (!response.ok) throw new Error(result.error || 'Could not save.');
       renderCosts(result.ai_costs);
-      input.value = Number(input.value.trim().replace(',', '.')).toLocaleString('de-DE', {
+      input.value = Number(input.value.trim().replace(',', '.')).toLocaleString('en-US', {
         minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false });
-      status.textContent = 'Guthaben gespeichert. Session und Overall wurden zurückgesetzt.';
+      status.textContent = 'Balance saved. Session and Overall have been reset.';
     } catch (error) {
-      status.textContent = error.name === 'TimeoutError' ? 'Keine Bestätigung erhalten. Bitte Anzeige prüfen, bevor du erneut speicherst.'
-        : error.message || 'Speichern fehlgeschlagen.';
+      status.textContent = error.name === 'TimeoutError' ? 'No confirmation received. Check the display before saving again.'
+        : error.message || 'Could not save.';
     } finally { button.disabled = false; }
   });
   const MAX_LINES = 300;
@@ -634,14 +636,50 @@
 
   let progressSample = null;
   let shuttingDown = false;
+  function dashboardStatus(status) {
+    if (!status || status === 'Warte auf DJ') return 'Waiting for DJ';
+    if (status === 'DJ aktiv') return 'DJ active';
+    if (/^Bereit/.test(status)) return 'Ready · start Standard or enter a music request';
+    if (/werden beendet/.test(status)) return 'Stopping DJ and dashboard…';
+    if (status === 'DJ beendet') return 'DJ stopped';
+    if (/Warte auf Spotify-Gerät|warte auf ein aktives Spotify-Gerät/.test(status)) return 'Waiting for an active Spotify device';
+    if (/Start angefordert/.test(status)) return 'Starting track · waiting for Spotify confirmation';
+    if (/Start nicht bestätigt/.test(status)) return 'Playback not confirmed · send a new DJ command · see log';
+    if (/Manueller oder unklarer Wechsel/.test(status)) return 'Manual or uncertain track change · DJ released until your next command';
+    if (/Gerätewechsel erkannt/.test(status)) return 'Device changed · DJ follows your active Spotify device';
+    if (/^Pausiert/.test(status)) return 'Paused · resume in Spotify';
+    if (/Playback-Daten/.test(status)) return 'Playback data unavailable · waiting for Spotify';
+    if (/lokale Wartezeit abgelaufen/.test(status)) return 'Local cooldown ended · next request will check Spotify availability';
+    if (/Rate-Limit/.test(status)) {
+      const wait = status.match(/(\d+)s/);
+      return `Rate limit${wait ? ' · wait ' + wait[1] + 's' : ''} · see log for next steps`;
+    }
+    if (/AI-Anfrage wird bearbeitet/.test(status)) return 'Preparing your request · interpreting and checking Spotify';
+    if (/^AI: Prüfe/.test(status)) return 'Checking song requests and suggestions on Spotify';
+    if (/AI wartet|Bitte konkretisieren/.test(status)) return 'Your input is needed · see the question in the DJ log';
+    if (/AI-Session zurückgesetzt/.test(status)) return 'AI session cleared · enter a new music request';
+    if (/braucht Spotify-Leserechte/.test(status)) return 'Standard needs Spotify history access · see log for setup';
+    if (/verweigert den Zugriff/.test(status)) return 'Spotify access denied · check permissions';
+    if (/Songwünsche abgeschlossen/.test(status)) return 'Song requests completed · send a new DJ command';
+    if (/Feedback ist nur/.test(status)) return 'Feedback requires a confirmed track in Standard';
+    if (/gesperrt|Session-Ausschlüssen/.test(status)) return 'Request conflicts with your exclusions · update your request';
+    if (/keine passenden|Keine passenden|keine angefragten/.test(status)) return 'No matching music found · try another request';
+    if (/Zeitüberschreitung/.test(status)) return 'AI request timed out · please try again';
+    if (/Spotify bitte manuell pausieren|Pause nicht bestätigt/.test(status)) return 'Pause not confirmed · please check Spotify';
+    if (/Wiedergabe pausiert/.test(status)) return 'Playback paused · see DJ log';
+    if (/fehlgeschlagen|Fehler|Startfehler|nicht gestartet|nicht starten|nicht ladbar|nicht mehr gültig/.test(status)) return 'Request could not be completed · see DJ log and try again';
+    if (/Genre-Modi entfernt/.test(status)) return 'Choose Standard or enter a music request';
+    if (/^Debug:/.test(status)) return 'Debug mode · no playback requested';
+    return 'DJ status updated · see DJ log';
+  }
   function renderProgress() {
     const value = progressAt(progressSample, performance.now());
     const rail = document.getElementById("progress-rail");
     const elapsed = value ? formatProgressTime(value.position) : "--:--";
     const duration = value ? formatProgressTime(value.duration) : "--:--";
-    const description = !value ? "Keine Playback-Daten"
-      : value.stale ? "Warte auf neue Playback-Daten"
-      : `${elapsed} / ${duration}${value.playing ? "" : " · Pausiert"}`;
+    const description = !value ? "No playback data"
+      : value.stale ? "Waiting for updated playback data"
+      : `${elapsed} / ${duration}${value.playing ? "" : " · Paused"}`;
     document.getElementById("progress-elapsed").textContent = elapsed;
     document.getElementById("progress-duration").textContent = duration;
     document.getElementById("playback-progress").classList.toggle("is-stale", !value || value.stale);
@@ -656,8 +694,8 @@
   socket.on("disconnect", () => {
     progressSample = null; renderProgress();
     document.getElementById("dj-status").textContent = shuttingDown
-      ? "DJ und Dashboard beendet. Für den Neustart start_dj_hidden.vbs ausführen."
-      : "Verbindung zum DJ unterbrochen";
+      ? "DJ and dashboard stopped. Run start_dj_hidden.vbs to restart."
+      : "Disconnected from DJ";
   });
 
   socket.on("state", (s) => {
@@ -668,7 +706,7 @@
     shuttingDown = Boolean(s.shutting_down);
     progressSample = progressSampleFromState(s, progressSample, performance.now());
     renderProgress();
-    document.getElementById("dj-status").textContent = s.status || "Warte auf DJ";
+    document.getElementById("dj-status").textContent = dashboardStatus(s.status);
     // Artist
     document.getElementById("now-artist").textContent = s.current_artist || "—";
 
@@ -704,7 +742,7 @@
       pb.style.borderColor   = "var(--accent)";
       pb.style.color         = "var(--accent)";
     } else {
-      pb.textContent         = "⏸ Nicht bestätigt / pausiert";
+      pb.textContent         = "⏸ Paused";
       pb.style.borderColor   = "#555566";
       pb.style.color         = "#555566";
     }
@@ -733,6 +771,7 @@
     // Keep raw SDK noise and per-candidate searches available without repeating them in the overview.
     if (/^ai artist|^your application has reached a rate\/request limit|^max retries reached/.test(l)) return "detail";
     if (/startdiagnose|nicht bestätigt|fehlgeschlagen|fehler|timeouterror|zeitüberschreitung|traceback|exception|\berror\b|\bfailed\b/.test(l)) return "error";
+    if (/^(?:spotify[- ]?)?wiedergabe pausiert[.!]?$|^pausiert(?:; auf fortsetzen in spotify warten)?[.!]?$/.test(l)) return "detail";
     if (/rate.limit|http 429|blockplanung|keine passenden|kein passender|keine ungesperrten|automatische planung beendet|übersprungen|ausgelassen|playback-daten|freigegeben|neuer dj-befehl erforderlich|braucht spotify-leserechte/.test(l)) return "warning";
     if (/^--- neuer song ---$|^(?:standard dj|global dj|dj) ->|^track finished|^track near end|^skip hotkey/.test(l)) return "detail";
     if (/^--- standard:/.test(l)) return "section block";
@@ -753,15 +792,15 @@
   function renderCosts(costs) {
     const valid = costs && costs.available && costs.active;
     const money = value => typeof value === 'number' && Number.isFinite(value)
-      ? (Math.abs(value) < .005 ? 0 : value).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USD' : '—';
+      ? (Math.abs(value) < .005 ? 0 : value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USD' : '—';
     document.getElementById('cost-session').textContent = valid ? money(costs.session_usd) : '—';
     document.getElementById('cost-total').textContent = valid ? money(costs.total_usd) : '—';
     document.getElementById('cost-remaining').textContent = valid ? money(costs.remaining_usd) : '—';
-    document.getElementById('cost-note').textContent = !costs || !costs.available ? 'Kostendaten nicht verfügbar'
-      : !costs.active ? 'Erfassung nach DJ-Neustart'
-      : costs.balance_error ? 'Guthabendaten nicht verfügbar'
-      : costs.unknown ? `Unvollständig · ${costs.unknown} Anfragen ohne Kostenwert`
-      : typeof costs.remaining_usd === 'number' ? 'Berechnet · seit Guthaben-Eingabe' : 'Berechnet · seit Erfassungsbeginn';
+    document.getElementById('cost-note').textContent = !costs || !costs.available ? 'Cost data unavailable'
+      : !costs.active ? 'Tracking starts after DJ restart'
+      : costs.balance_error ? 'Balance data unavailable'
+      : costs.unknown ? `Incomplete · ${costs.unknown} requests with unknown cost`
+      : typeof costs.remaining_usd === 'number' ? 'Estimated · since balance update' : 'Estimated · since tracking started';
   }
 
   function classifyVoice(line) {
