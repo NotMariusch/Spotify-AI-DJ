@@ -67,8 +67,13 @@ test('cost display shows USD and flags unknown charges instead of pretending zer
   vm.createContext(context);
   vm.runInContext(code, context);
   context.renderCosts({ available: true, active: true, session_usd: .0105, total_usd: .1234, unknown: 0 });
-  assert.equal(elements['cost-session'].textContent, '0,0105 USD');
-  assert.equal(elements['cost-total'].textContent, '0,1234 USD');
+  assert.equal(elements['cost-session'].textContent, '0,01 USD');
+  assert.equal(elements['cost-total'].textContent, '0,12 USD');
+  context.renderCosts({ available: true, active: true, session_usd: .001, total_usd: .001, remaining_usd: 23.4999, unknown: 0 });
+  assert.equal(elements['cost-session'].textContent, '0,00 USD');
+  assert.equal(elements['cost-remaining'].textContent, '23,50 USD');
+  context.renderCosts({ available: true, active: true, remaining_usd: -.014, unknown: 0 });
+  assert.equal(elements['cost-remaining'].textContent, '-0,01 USD');
   context.renderCosts({ available: true, active: true, session_usd: .01, total_usd: .12, unknown: 2 });
   assert.match(elements['cost-note'].textContent, /Unvollständig.*2/);
   context.renderCosts({ available: false });

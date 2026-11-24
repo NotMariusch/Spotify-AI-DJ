@@ -17,6 +17,7 @@ data/dj_crash.log
 data/banned_tracks.json
 data/banned_artists.json
 data/ai_costs.json
+data/ai_balance.json
 
 # Keep the data folder itself in the repo
 !data/.gitkeep

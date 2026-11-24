@@ -1,10 +1,15 @@
 """Local USD estimate from returned usage; never an account balance."""
 import json
 import threading
+import re
+import uuid
+from decimal import Decimal
 from pathlib import Path
 from json_store import write_json_atomic
 
 PATH = Path(__file__).resolve().parents[1] / 'data' / 'ai_costs.json'
+BALANCE_PATH = PATH.with_name('ai_balance.json')
+balance_lock = threading.Lock()
 PRICING_DATE = '2026-11-24'
 # USD nanodollars per token, standard global Claude API pricing.
 # https://platform.claude.com/docs/en/about-claude/pricing
@@ -58,7 +63,7 @@ class CostLedger:
         self.lock = threading.Lock()
         self.data = read_state(path)
         if self.data is not None:
-            self.data.update(session=0, active=True, pricing_date=PRICING_DATE)
+            self.data.update(session=0, session_id=uuid.uuid4().hex, active=True, pricing_date=PRICING_DATE)
             self._save()
 
     def _save(self):
@@ -96,11 +101,46 @@ def record(response=None):
         ledger.record(response)
 
 
-def dashboard_costs():
-    data = read_state()
+def set_balance(value, path=PATH, balance_path=BALANCE_PATH):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{1,6}([.,]\d{1,2})?', value.strip()):
+        raise ValueError('Bitte einen USD-Betrag mit maximal zwei Nachkommastellen eingeben.')
+    amount = int(Decimal(value.strip().replace(',', '.')) * 1_000_000_000)
+    with balance_lock:
+        data = read_state(path)
+        if data is None or not data.get('active'):
+            raise ValueError('Kostenerfassung ist noch nicht verfügbar. Bitte DJ neu starten.')
+        # Independent baseline: the DJ remains the sole writer of usage totals.
+        write_json_atomic(balance_path, dict(amount=amount, total=data['total'],
+            session=data['session'], session_id=data.get('session_id'), unknown=data['unknown']))
+
+
+def dashboard_costs(path=PATH, balance_path=BALANCE_PATH):
+    data = read_state(path)
     if data is None:
         return dict(available=False)
+    baseline = None
+    balance_error = False
+    try:
+        baseline = json.loads(Path(balance_path).read_text(encoding='utf-8'))
+        if not isinstance(baseline, dict) or any(type(baseline.get(k)) is not int or baseline[k] < 0
+                for k in ('amount', 'total', 'session', 'unknown')):
+            raise ValueError()
+        if baseline['total'] > data['total'] or baseline['unknown'] > data['unknown']:
+            raise ValueError()
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError):
+        baseline = None
+        balance_error = True
+    total, session, unknown = data['total'], data['session'], data['unknown']
+    remaining = None
+    if baseline is not None:
+        total -= baseline['total']
+        unknown -= baseline['unknown']
+        if data.get('session_id') == baseline.get('session_id'):
+            session = max(0, session - baseline['session'])
+        remaining = (baseline['amount'] - total) / 1_000_000_000
     return dict(available=True, active=data.get('active', False),
-                session_usd=data['session'] / 1_000_000_000,
-                total_usd=data['total'] / 1_000_000_000,
-                unknown=data['unknown'], requests=data['requests'], pricing_date=PRICING_DATE)
+                session_usd=session / 1_000_000_000,
+                total_usd=total / 1_000_000_000, remaining_usd=remaining, balance_error=balance_error,
+                unknown=unknown, requests=data['requests'], pricing_date=PRICING_DATE)

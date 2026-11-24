@@ -20,6 +20,58 @@ def response(**usage):
 
 
 class CostTests(unittest.TestCase):
+    def test_balance_resets_display_preserves_history_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            usage, balance = Path(folder) / 'usage.json', Path(folder) / 'balance.json'
+            ledger = ai_costs.CostLedger(usage)
+            ledger.record(response())
+            ledger.record()
+            ai_costs.set_balance('23,00', usage, balance)
+            state = ai_costs.dashboard_costs(usage, balance)
+            self.assertEqual((state['session_usd'], state['total_usd'], state['remaining_usd'], state['unknown']), (0, 0, 23, 0))
+            self.assertEqual(ai_costs.read_state(usage)['total'], 10500000)
+            ledger.record(response())
+            state = ai_costs.dashboard_costs(usage, balance)
+            self.assertEqual(state['remaining_usd'], 22.9895)
+            self.assertEqual(state['total_usd'], .0105)
+            restarted = ai_costs.CostLedger(usage)
+            state = ai_costs.dashboard_costs(usage, balance)
+            self.assertEqual(state['session_usd'], 0)
+            self.assertEqual(state['remaining_usd'], 22.9895)
+            restarted.record(response())
+            self.assertEqual(ai_costs.dashboard_costs(usage, balance)['session_usd'], .0105)
+            ai_costs.set_balance('0.00', usage, balance)
+            restarted.record(response())
+            self.assertEqual(ai_costs.dashboard_costs(usage, balance)['remaining_usd'], -.0105)
+
+    def test_invalid_balance_and_corruption_do_not_erase_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            usage, balance = Path(folder) / 'usage.json', Path(folder) / 'balance.json'
+            ledger = ai_costs.CostLedger(usage)
+            ai_costs.set_balance('10.00', usage, balance)
+            original = balance.read_bytes()
+            for value in ('-1', 'NaN', '1.234', '1e3', '1000000', '', None, 23, True):
+                with self.assertRaises(ValueError):
+                    ai_costs.set_balance(value, usage, balance)
+                self.assertEqual(balance.read_bytes(), original)
+            balance.write_text('broken')
+            state = ai_costs.dashboard_costs(usage, balance)
+            self.assertTrue(state['balance_error'])
+            self.assertIsNone(state['remaining_usd'])
+            self.assertEqual(balance.read_text(), 'broken')
+
+    def test_balance_endpoint_validation_and_disk_failure(self):
+        import dj_server
+        client = dj_server.app.test_client()
+        with patch.object(ai_costs, 'set_balance') as save, patch.object(ai_costs, 'dashboard_costs', return_value={'available': True}):
+            self.assertEqual(client.post('/ai_balance', json={'amount': '23,00'}, headers={'Origin': 'https://other.example'}).status_code, 403)
+            self.assertEqual(client.post('/ai_balance', json=[]).status_code, 400)
+            save.assert_not_called()
+            self.assertEqual(client.post('/ai_balance', json={'amount': '23,00'}).status_code, 200)
+            save.assert_called_once_with('23,00')
+            save.side_effect = OSError()
+            self.assertEqual(client.post('/ai_balance', json={'amount': '23'}).status_code, 503)
+
     def test_standard_and_cache_costs_are_not_double_counted(self):
         self.assertEqual(ai_costs.estimate(response()), 10500000)
         self.assertEqual(ai_costs.estimate(response(cache_read_input_tokens=1000,

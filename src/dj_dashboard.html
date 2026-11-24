@@ -401,6 +401,13 @@
   .appearance-menu input { width: 100%; font: inherit; color: var(--muted); margin-bottom: 12px; }
   .appearance-menu input::file-selector-button { background: #a78bfa20; color: #ddd6fe;
     border: 1px solid #a78bfa40; border-radius: 7px; padding: 7px; cursor: pointer; }
+  .balance-editor { position: relative; }
+  .balance-editor summary { cursor: pointer; color: #c4b5fd; list-style: none; padding: 4px 6px; border-radius: 6px; }
+  .balance-editor summary:hover { background: #a78bfa18; }
+  .balance-editor .appearance-menu { top: auto; bottom: calc(100% + 12px); right: 0; z-index: 3;
+    width: min(300px, 80vw); }
+  .balance-editor input { margin: 8px 0; padding: 8px; }
+  .balance-editor button { margin-top: 4px; }
   :focus-visible { outline: 2px solid var(--accent3); outline-offset: 3px; }
   @media (max-width: 760px) {
     body { padding: 6px; gap: 6px; grid-template-rows: auto minmax(0, 1fr) 58px; }
@@ -474,10 +481,21 @@
         <li><kbd>F13 + V</kbd> = Sprachaufnahme starten/stoppen</li>
       </ul>
     </aside>
-    <div class="ai-costs" title="Aus Anthropic-Verbrauchsdaten berechnete USD-Kosten, keine Rechnung und kein Kontoguthaben. Ohne Steuern oder Währungsumrechnung. Erfassung erst ab Aktivierung dieser Funktion.">
+    <div class="ai-costs" title="Berechnete USD-Kosten. Restguthaben geschätzt aus deiner letzten Eingabe; kein Live-Kontostand von Anthropic.">
       <span>KI-Kosten ≈</span>
       <span>Session <strong id="cost-session">—</strong></span>
       <span>Overall <strong id="cost-total">—</strong></span>
+      <span>Rest ≈ <strong id="cost-remaining">—</strong></span>
+      <details class="balance-editor">
+        <summary>Guthaben</summary>
+        <form class="appearance-menu" id="balance-form">
+          <label for="balance-amount"><strong>Aktuelles Guthaben (USD)</strong></label>
+          <p>Deinen Kontostand von Anthropic eingeben. Session und Overall starten beim Speichern wieder bei null.</p>
+          <input class="ai-input" id="balance-amount" type="text" inputmode="decimal" placeholder="23,00" maxlength="9" required autocomplete="off">
+          <button class="send-btn" id="balance-save" type="submit">Speichern & zurücksetzen</button>
+          <p id="balance-status" role="status">Restguthaben ist geschätzt. Andere Apps und Aufladungen werden nicht automatisch erfasst.</p>
+        </form>
+      </details>
       <span class="cost-note" id="cost-note">Warte auf Kostendaten</span>
     </div>
   </div>
@@ -555,6 +573,32 @@
     }
   });
   const socket = io();
+  document.getElementById('balance-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const input = document.getElementById('balance-amount');
+    const status = document.getElementById('balance-status');
+    const button = document.getElementById('balance-save');
+    if (!/^\d{1,6}([.,]\d{1,2})?$/.test(input.value.trim())) {
+      status.textContent = 'Bitte einen USD-Betrag mit maximal zwei Nachkommastellen eingeben.';
+      return;
+    }
+    button.disabled = true;
+    status.textContent = 'Wird gespeichert …';
+    try {
+      const response = await fetch('/ai_balance', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: input.value.trim() }),
+        signal: AbortSignal.timeout(10000) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Speichern fehlgeschlagen.');
+      renderCosts(result.ai_costs);
+      input.value = Number(input.value.trim().replace(',', '.')).toLocaleString('de-DE', {
+        minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false });
+      status.textContent = 'Guthaben gespeichert. Session und Overall wurden zurückgesetzt.';
+    } catch (error) {
+      status.textContent = error.name === 'TimeoutError' ? 'Keine Bestätigung erhalten. Bitte Anzeige prüfen, bevor du erneut speicherst.'
+        : error.message || 'Speichern fehlgeschlagen.';
+    } finally { button.disabled = false; }
+  });
   const MAX_LINES = 300;
   const modeMap = {"Standard":"btn-5"};
 
@@ -703,14 +747,16 @@
 
   function renderCosts(costs) {
     const valid = costs && costs.available && costs.active;
-    const money = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
-      ? value.toLocaleString('de-DE', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + ' USD' : '—';
+    const money = value => typeof value === 'number' && Number.isFinite(value)
+      ? (Math.abs(value) < .005 ? 0 : value).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USD' : '—';
     document.getElementById('cost-session').textContent = valid ? money(costs.session_usd) : '—';
     document.getElementById('cost-total').textContent = valid ? money(costs.total_usd) : '—';
+    document.getElementById('cost-remaining').textContent = valid ? money(costs.remaining_usd) : '—';
     document.getElementById('cost-note').textContent = !costs || !costs.available ? 'Kostendaten nicht verfügbar'
       : !costs.active ? 'Erfassung nach DJ-Neustart'
+      : costs.balance_error ? 'Guthabendaten nicht verfügbar'
       : costs.unknown ? `Unvollständig · ${costs.unknown} Anfragen ohne Kostenwert`
-      : 'Berechnet · seit Erfassungsbeginn';
+      : typeof costs.remaining_usd === 'number' ? 'Berechnet · seit Guthaben-Eingabe' : 'Berechnet · seit Erfassungsbeginn';
   }
 
   function classifyVoice(line) {

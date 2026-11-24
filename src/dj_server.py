@@ -211,6 +211,23 @@ def voice_log_endpoint():
     return "", 204
 
 
+@app.route('/ai_balance', methods=['POST'])
+def balance_endpoint():
+    if request.headers.get('Origin') not in (None, request.host_url.rstrip('/')):
+        return {'error': 'Zugriff nicht erlaubt.'}, 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {'error': 'Ungültige Eingabe.'}, 400
+    from ai_costs import set_balance, dashboard_costs
+    try:
+        set_balance(payload.get('amount'))
+    except ValueError as error:
+        return {'error': str(error)}, 400
+    except OSError:
+        return {'error': 'Guthaben konnte nicht gespeichert werden.'}, 503
+    return {'ai_costs': dashboard_costs()}
+
+
 # ── Websocket events ──
 
 def send_command(text: str):

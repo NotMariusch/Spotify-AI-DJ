@@ -54,9 +54,23 @@ rechts lässt sich ein eigenes Hintergrundbild wählen (JPG, PNG oder WebP bis
 nicht auf den Server hochgeladen. **Zurück zum Verlauf** entfernt das Bild wieder.
 
 Die Kostenleiste zeigt berechnete **USD-Beträge** für die laufende DJ-Session
-und insgesamt seit Aktivierung der Erfassung. Die Session beginnt beim DJ-Start;
+und insgesamt seit Aktivierung der Erfassung bzw. der letzten Guthaben-Eingabe.
+Alle drei Anzeigen (**Session**, **Overall**, **Rest ≈**) verwenden zwei
+Nachkommastellen; intern werden kleine Beträge ohne diese Rundung aufsummiert.
+Die Session beginnt beim DJ-Start;
 der Gesamtbetrag bleibt in `data/ai_costs.json` erhalten. Frühere Aufrufe vor
 Einführung dieser Funktion können nicht nachträglich erfasst werden.
+
+Über **Guthaben** lässt sich der aktuelle Anthropic-Kontostand in USD eingeben
+(Punkt oder Komma, maximal zwei Nachkommastellen). **Speichern & zurücksetzen**
+setzt Session und Overall sichtbar auf null. Die bisherigen Kostendaten bleiben
+erhalten; der Ausgangswert wird separat in `data/ai_balance.json` gespeichert.
+Das geschätzte Restguthaben sinkt mit den danach erfassten Kosten und bleibt
+über Neustarts erhalten. Ohne neue Eingabe gilt der bisherige Ausgangswert.
+Aufladungen und Kosten anderer Anwendungen erfordern einen neuen manuellen
+Abgleich. Ohne Guthaben-Eingabe steht bei Rest ein Strich. Fehlende
+Verbrauchsdaten werden weiterhin als unvollständig markiert. Beide lokalen
+Kostendateien sind von Git ausgeschlossen.
 
 Die Rechnung verwendet die von Anthropic zurückgegebenen Verbrauchsdaten und
 die [offiziellen Standardpreise](https://platform.claude.com/docs/en/about-claude/pricing)
@@ -72,8 +86,8 @@ Timeouts, Netzwerkfehler und Antworten ohne unterstützte Verbrauchsdaten werden
 als unbekannte Kosten markiert: Die sichtbare Summe ist dann unvollständig.
 Unbekannte Modelle werden nicht als kostenlose Aufrufe behandelt.
 
-Dies ist eine lokale Kostenschätzung für diesen DJ, **kein Guthaben und keine
-Anthropic-Rechnung**. Steuern, Wechselkurse, Rabatte und Nutzung anderer Apps
+Dies ist eine lokale Kostenschätzung für diesen DJ, **kein live abgerufenes
+Kontoguthaben und keine Anthropic-Rechnung**. Steuern, Wechselkurse, Rabatte und Nutzung anderer Apps
 sind nicht enthalten. Gespeichert werden ausschließlich Zähler und Summen,
 keine Prompts, Antworten oder Zugangsdaten. Es entstehen keine zusätzlichen
 API-Abfragen für die Anzeige. Zum Aktivieren nach einem Update den DJ neu starten.
