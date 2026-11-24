@@ -215,6 +215,7 @@ def ask_claude(user_request: str, session_context=None) -> MusicRequest:
 
 
 def _request_model(payload, api_key, *, timeout_seconds=MODEL_TIMEOUT_SECONDS, stage='Musikauswahl', cancel_event=None):
+    from ai_costs import record as record_cost
     def check_cancelled():
         if cancel_event is not None and cancel_event.is_set():
             from background_pool import Cancelled
@@ -238,9 +239,11 @@ def _request_model(payload, api_key, *, timeout_seconds=MODEL_TIMEOUT_SECONDS, s
         try:
             with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            record_cost(data)
             check_cancelled()
             break
         except TimeoutError:
+            record_cost()
             # The server may already have processed this paid request. Do not
             # automatically submit it again after an ambiguous network timeout.
             raise ModelTimeoutError(f'{stage}: Claude-Antwort nicht rechtzeitig empfangen (Netzwerk-Zeitlimit {timeout_seconds}s). Bitte die Anfrage erneut senden.') from None
@@ -267,8 +270,12 @@ def _request_model(payload, api_key, *, timeout_seconds=MODEL_TIMEOUT_SECONDS, s
             body = e.read().decode("utf-8")
             raise ValueError(f"Claude API {e.code}: {body}")
         except urllib.error.URLError as error:
+            record_cost()
             if isinstance(error.reason, TimeoutError):
                 raise ModelTimeoutError(f'{stage}: Claude-Antwort nicht rechtzeitig empfangen (Netzwerk-Zeitlimit {timeout_seconds}s). Bitte die Anfrage erneut senden.') from None
+            raise
+        except (OSError, json.JSONDecodeError):
+            record_cost()
             raise
     if data is None:
         raise ValueError("Claude API failed after 3 attempts")

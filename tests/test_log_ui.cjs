@@ -60,3 +60,19 @@ test('details toggle preserves raw lines and section formatting; text remains in
   assert.equal(entries.length, 3);
   assert.ok(html.includes('#dj-log:not(.show-details) .detail { display: none; }'));
 });
+
+test('cost display shows USD and flags unknown charges instead of pretending zero', () => {
+  const elements = {};
+  const context = { document: { getElementById: id => elements[id] ||= {} } };
+  vm.createContext(context);
+  vm.runInContext(code, context);
+  context.renderCosts({ available: true, active: true, session_usd: .0105, total_usd: .1234, unknown: 0 });
+  assert.equal(elements['cost-session'].textContent, '0,0105 USD');
+  assert.equal(elements['cost-total'].textContent, '0,1234 USD');
+  context.renderCosts({ available: true, active: true, session_usd: .01, total_usd: .12, unknown: 2 });
+  assert.match(elements['cost-note'].textContent, /Unvollständig.*2/);
+  context.renderCosts({ available: false });
+  assert.equal(elements['cost-total'].textContent, '—');
+  context.renderCosts({ available: true, active: false });
+  assert.match(elements['cost-note'].textContent, /DJ-Neustart/);
+});

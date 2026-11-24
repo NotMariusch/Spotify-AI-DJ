@@ -46,6 +46,38 @@ sind standardmäßig ausgeblendet; „Details anzeigen“ blendet die im Logpuff
 vorhandenen Originalmeldungen wieder ein. Rate-Limits, fehlgeschlagene Starts
 und Freigaben der DJ-Steuerung bleiben in der Übersicht sichtbar.
 
+## KI-Kosten im Dashboard
+
+Die dezente Leiste unten zeigt **Session** und **Overall**. Über **Look** oben
+rechts lässt sich ein eigenes Hintergrundbild wählen (JPG, PNG oder WebP bis
+2 MB). Es wird abgedunkelt dargestellt und nur im jeweiligen Browser gespeichert,
+nicht auf den Server hochgeladen. **Zurück zum Verlauf** entfernt das Bild wieder.
+
+Die Kostenleiste zeigt berechnete **USD-Beträge** für die laufende DJ-Session
+und insgesamt seit Aktivierung der Erfassung. Die Session beginnt beim DJ-Start;
+der Gesamtbetrag bleibt in `data/ai_costs.json` erhalten. Frühere Aufrufe vor
+Einführung dieser Funktion können nicht nachträglich erfasst werden.
+
+Die Rechnung verwendet die von Anthropic zurückgegebenen Verbrauchsdaten und
+die [offiziellen Standardpreise](https://platform.claude.com/docs/en/about-claude/pricing)
+für Claude Sonnet 4.6 (geprüft am 24.11.2026): $3 pro Million Input-Token,
+$15 pro Million Output-Token; Cache-Schreiben $3,75/5 Minuten bzw. $6/1 Stunde,
+Cache-Lesen $0,30 pro Million Token. Cache-Token werden separat berechnet.
+Im Dashboard stehen Geldbeträge statt Tokenzahlen. Die Preistabelle ist fest
+im Code hinterlegt und muss bei Preisänderungen aktualisiert werden.
+
+Auch später verworfene oder abgeschnittene Modellantworten werden mitgerechnet,
+ebenso bereits empfangene Antworten eines inzwischen abgebrochenen Auftrags.
+Timeouts, Netzwerkfehler und Antworten ohne unterstützte Verbrauchsdaten werden
+als unbekannte Kosten markiert: Die sichtbare Summe ist dann unvollständig.
+Unbekannte Modelle werden nicht als kostenlose Aufrufe behandelt.
+
+Dies ist eine lokale Kostenschätzung für diesen DJ, **kein Guthaben und keine
+Anthropic-Rechnung**. Steuern, Wechselkurse, Rabatte und Nutzung anderer Apps
+sind nicht enthalten. Gespeichert werden ausschließlich Zähler und Summen,
+keine Prompts, Antworten oder Zugangsdaten. Es entstehen keine zusätzlichen
+API-Abfragen für die Anzeige. Zum Aktivieren nach einem Update den DJ neu starten.
+
 ## Einrichtung unter Windows
 
 Alle folgenden PowerShell-Befehle werden im Repository-Ordner ausgeführt.

@@ -1608,6 +1608,8 @@ def main():
     global sp, discovered_artists
     import atexit
     acquire_lock()
+    from ai_costs import configure as configure_costs
+    configure_costs()
     atexit.register(release_lock)
     load_track_cache()
     load_banned()

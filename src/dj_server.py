@@ -152,7 +152,9 @@ def launch_dj():
 # ── Broadcast loop ──
 
 def dashboard_state():
+    from ai_costs import dashboard_costs
     snapshot = dict(state)
+    snapshot['ai_costs'] = dashboard_costs()
     sample = snapshot.get("playback_progress")
     if sample is not None:
         sample = dict(sample)

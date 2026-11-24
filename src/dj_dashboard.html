@@ -9,13 +9,13 @@
 <style>
   :root {
     --bg:      #0a0a0c;
-    --surface: #111115;
-    --border:  #1e1e26;
+    --surface: rgba(20, 22, 31, .72);
+    --border:  rgba(190, 184, 220, .10);
     --accent:  #1db954;
     --accent2: #ff4d4d;
     --accent3: #a78bfa;
     --text:    #e8e8f0;
-    --muted:   #555566;
+    --muted:   #9293a8;
     --warn:    #f59e0b;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -250,6 +250,9 @@
   .log-key-song { color: #65df92; }
   .log-key-block { color: #c4b5fd; }
   .log-key-warning { color: #fcd34d; }
+  .ai-costs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 9px 16px; border-bottom: 1px solid var(--border); background: #14131b; color: #aaa5bd; font-size: 11px; }
+  .ai-costs strong { color: #ddd6fe; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .ai-costs .cost-note { color: #b8adc9; margin-left: auto; }
 
   .hotkey-help {
     flex-shrink: 0;
@@ -357,9 +360,62 @@
   .btn.playback            { cursor: default; }
   .divider { width:1px; height:24px; background:var(--border); flex-shrink:0; }
   .mode-group { display:flex; gap:4px; flex-shrink:0; }
+
+  /* One quiet backdrop, softly separated surfaces. */
+  body { isolation: isolate; padding: 12px; gap: 12px; grid-template-rows: 68px minmax(0, 1fr) 60px; }
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: -2; pointer-events: none;
+    background: radial-gradient(ellipse at 85% 10%, #343055, transparent 65%),
+                radial-gradient(ellipse at 10% 90%, #173c34, #10121b 75%);
+  }
+  .dashboard-backdrop { position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background-position: center; background-size: cover; opacity: .24; }
+  header, footer, .panel { border: 1px solid var(--border); border-radius: 16px;
+    background: rgba(13, 15, 22, .82); box-shadow: 0 8px 32px #0002; }
+  header, footer { backdrop-filter: blur(18px); }
+  main { gap: 12px; grid-template-columns: minmax(0, 1fr) 340px; }
+  .panel:last-child { border-right: 1px solid var(--border); }
+  .panel-header, .log-tools, .hotkey-help, .ai-input-area { background: rgba(24, 26, 36, .45); }
+  .panel-header { padding: 14px 18px; letter-spacing: 1px; }
+  .log-tools { background: transparent; border-bottom: none; }
+  .log-line.section { border-image: linear-gradient(90deg, #a78bfa40, transparent) 1; }
+  .log-line.dj-pick { background: linear-gradient(90deg, #1db95419, #1db95404); border-radius: 8px; }
+  .log-line.warning, .log-line.error { border-radius: 8px; }
+  .ai-input { min-width: 0; background: #090c1380; border-radius: 10px; }
+  .send-btn { border-radius: 10px; color: #171323; }
+  .btn { border-radius: 9px; }
+  .ai-costs { padding: 8px 18px; font-size: 10px; gap: 8px 14px;
+    background: transparent; border-bottom: 0; border-top: 1px solid var(--border); color: var(--muted); }
+  .ai-costs strong { color: #b9b8cc; }
+  .ai-costs .cost-note { font-size: 9px; color: var(--muted); }
+  .appearance { position: relative; flex-shrink: 0; }
+  .appearance summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 11px;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; }
+  .appearance summary::-webkit-details-marker { display: none; }
+  .appearance summary:hover, .appearance[open] summary { color: var(--text); border-color: #a78bfa60; }
+  header { position: relative; z-index: 2; }
+  .appearance-menu { position: absolute; right: 0; top: calc(100% + 12px); width: 280px;
+    padding: 16px; border-radius: 14px; background: #191b27; border: 1px solid #a78bfa30;
+    box-shadow: 0 12px 40px #0008; font-size: 11px; line-height: 1.6; }
+  .appearance-menu p { color: var(--muted); margin: 8px 0 12px; }
+  .appearance-menu input { width: 100%; font: inherit; color: var(--muted); margin-bottom: 12px; }
+  .appearance-menu input::file-selector-button { background: #a78bfa20; color: #ddd6fe;
+    border: 1px solid #a78bfa40; border-radius: 7px; padding: 7px; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent3); outline-offset: 3px; }
+  @media (max-width: 760px) {
+    body { padding: 6px; gap: 6px; grid-template-rows: auto minmax(0, 1fr) 58px; }
+    header { flex-wrap: wrap; padding: 12px; gap: 10px; }
+    .now-playing { padding-left: 10px; }
+    .playback-progress { order: 5; flex-basis: 100%; }
+    .rec-indicator:not(.active) { display: none; }
+    main { gap: 6px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(130px, 28%); }
+    .hotkey-help { max-height: 100px; }
+    .ai-costs .cost-note { margin-left: 0; }
+  }
 </style>
 </head>
 <body>
+<div class="dashboard-backdrop" id="dashboard-backdrop" aria-hidden="true"></div>
 
 <header>
   <div class="logo">DJ<span>ctrl</span></div>
@@ -381,6 +437,16 @@
     <div class="rec-dot"></div>REC
   </div>
   <div class="mode-badge" id="mode-badge">—</div>
+  <details class="appearance">
+    <summary>◐ Look</summary>
+    <div class="appearance-menu">
+      <strong>Dein Hintergrund</strong>
+      <p>Ein eigenes Bild, sanft ausgeblendet. Bleibt nur in diesem Browser gespeichert.</p>
+      <input id="background-file" type="file" accept="image/jpeg,image/png,image/webp" aria-label="Hintergrundbild auswählen">
+      <button class="btn" id="background-reset" type="button">Zurück zum Verlauf</button>
+      <p id="background-status" role="status">JPG, PNG oder WebP · maximal 2 MB</p>
+    </div>
+  </details>
 </header>
 
 <main>
@@ -408,6 +474,12 @@
         <li><kbd>F13 + V</kbd> = Sprachaufnahme starten/stoppen</li>
       </ul>
     </aside>
+    <div class="ai-costs" title="Aus Anthropic-Verbrauchsdaten berechnete USD-Kosten, keine Rechnung und kein Kontoguthaben. Ohne Steuern oder Währungsumrechnung. Erfassung erst ab Aktivierung dieser Funktion.">
+      <span>KI-Kosten ≈</span>
+      <span>Session <strong id="cost-session">—</strong></span>
+      <span>Overall <strong id="cost-total">—</strong></span>
+      <span class="cost-note" id="cost-note">Warte auf Kostendaten</span>
+    </div>
   </div>
   <div class="panel" style="flex-direction:column;display:flex;overflow:hidden;">
     <div class="panel-header"><div class="dot" style="background:var(--accent3)"></div>Voice / Chat</div>
@@ -435,6 +507,53 @@
 </footer>
 
 <script>
+  const BACKGROUND_KEY = 'dj-background-v1';
+  function applyBackground(value) {
+    // Only local raster data, never arbitrary CSS or remote URLs.
+    if (value && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value)) return;
+    document.getElementById('dashboard-backdrop').style.backgroundImage = value ? `url("${value}")` : '';
+  }
+  try { applyBackground(localStorage.getItem(BACKGROUND_KEY)); } catch (_) { /* Storage can be disabled. */ }
+  let backgroundRevision = 0;
+  document.getElementById('background-file').addEventListener('change', async event => {
+    const revision = ++backgroundRevision;
+    const file = event.target.files[0];
+    const status = document.getElementById('background-status');
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 2 * 1024 * 1024) {
+      status.textContent = 'Bitte JPG, PNG oder WebP bis 2 MB wählen.';
+      event.target.value = '';
+      return;
+    }
+    try {
+      const value = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const preview = new Image();
+      preview.src = value;
+      await preview.decode();
+      if (revision !== backgroundRevision) return;
+      localStorage.setItem(BACKGROUND_KEY, value);
+      applyBackground(value);
+      status.textContent = 'Hintergrund gespeichert.';
+    } catch (_) {
+      if (revision === backgroundRevision) status.textContent = 'Bild konnte nicht geladen oder gespeichert werden. Bitte ein kleineres Bild versuchen.';
+    }
+    event.target.value = '';
+  });
+  document.getElementById('background-reset').addEventListener('click', () => {
+    ++backgroundRevision;
+    try {
+      localStorage.removeItem(BACKGROUND_KEY);
+      applyBackground(null);
+      document.getElementById('background-status').textContent = 'Standard-Verlauf wiederhergestellt.';
+    } catch (_) {
+      document.getElementById('background-status').textContent = 'Browser-Speicher ist nicht verfügbar.';
+    }
+  });
   const socket = io();
   const MAX_LINES = 300;
   const modeMap = {"Standard":"btn-5"};
@@ -496,6 +615,7 @@
   });
 
   socket.on("state", (s) => {
+    renderCosts(s.ai_costs);
     shuttingDown = Boolean(s.shutting_down);
     progressSample = progressSampleFromState(s, progressSample, performance.now());
     renderProgress();
@@ -579,6 +699,18 @@
 
   function toggleLogDetails(show) {
     document.getElementById('dj-log').classList.toggle('show-details', show);
+  }
+
+  function renderCosts(costs) {
+    const valid = costs && costs.available && costs.active;
+    const money = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? value.toLocaleString('de-DE', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + ' USD' : '—';
+    document.getElementById('cost-session').textContent = valid ? money(costs.session_usd) : '—';
+    document.getElementById('cost-total').textContent = valid ? money(costs.total_usd) : '—';
+    document.getElementById('cost-note').textContent = !costs || !costs.available ? 'Kostendaten nicht verfügbar'
+      : !costs.active ? 'Erfassung nach DJ-Neustart'
+      : costs.unknown ? `Unvollständig · ${costs.unknown} Anfragen ohne Kostenwert`
+      : 'Berechnet · seit Erfassungsbeginn';
   }
 
   function classifyVoice(line) {

@@ -70,6 +70,7 @@ class StandardControlsTests(unittest.TestCase):
                          'load_discovered', 'connect', 'status'):
                 stack.enter_context(patch.object(dj, name))
             stack.enter_context(patch('atexit.register'))
+            stack.enter_context(patch('ai_costs.configure'))
             stack.enter_context(patch.object(dj, 'sp', None))
             stack.enter_context(patch.object(dj, 'discovered_artists', {}))
             stack.enter_context(patch.object(dj, 'run_dj', side_effect=SystemExit))
