@@ -772,6 +772,7 @@
     if (/^ai artist|^your application has reached a rate\/request limit|^max retries reached/.test(l)) return "detail";
     if (/startdiagnose|nicht bestätigt|fehlgeschlagen|fehler|timeouterror|zeitüberschreitung|traceback|exception|\berror\b|\bfailed\b/.test(l)) return "error";
     if (/^(?:spotify[- ]?)?wiedergabe pausiert[.!]?$|^pausiert(?:; auf fortsetzen in spotify warten)?[.!]?$/.test(l)) return "detail";
+    if (/^playback-daten (?:fehlen; keine bewertung und kein neustart|vorübergehend unbekannt)[.!]?$/.test(l)) return "detail";
     if (/rate.limit|http 429|blockplanung|keine passenden|kein passender|keine ungesperrten|automatische planung beendet|übersprungen|ausgelassen|playback-daten|freigegeben|neuer dj-befehl erforderlich|braucht spotify-leserechte/.test(l)) return "warning";
     if (/^--- neuer song ---$|^(?:standard dj|global dj|dj) ->|^track finished|^track near end|^skip hotkey/.test(l)) return "detail";
     if (/^--- standard:/.test(l)) return "section block";
