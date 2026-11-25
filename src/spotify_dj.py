@@ -1047,7 +1047,8 @@ def prepare_reference_selection(interpreted, user_request):
     cached.update(evidence)
     references = interpreted.reference_songs
     artists = resolve_artists_to_ids(sp, [r.artist for r in references], known,
-                                     song_hints=interpreted.artist_hints + references, catalog_evidence=cached)
+                                     song_hints=interpreted.artist_hints + references, catalog_evidence=cached,
+                                     explicit_songs=references)
     anchor_plan = replace(interpreted, kind='songs', songs=references)
     found, missing = resolve_song_wishes(sp, anchor_plan, artists, cached, qualify)
     if missing:
@@ -1576,7 +1577,8 @@ def run_dj():
                         resolved = resolve_artists_to_ids(
                             sp, artist_names, all_artists,
                             song_hints=ai_request_plan.artist_hints + ai_request_plan.reference_songs + ai_request_plan.songs,
-                            catalog_evidence=catalog_evidence)
+                            catalog_evidence=catalog_evidence,
+                            explicit_songs=ai_request_plan.songs if ai_request_plan.kind == 'songs' else ())
                         if not resolved:
                             status("AI: keine angefragten Künstler gefunden; neuer DJ-Befehl erforderlich")
                         else:

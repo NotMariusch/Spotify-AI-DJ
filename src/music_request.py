@@ -349,7 +349,7 @@ def preserve_refinement_selection(plan, previous, user_text):
     return replace(plan, selection=selection)
 
 
-def check_explicit_period(request, text):
+def check_explicit_period(request, text, today=None):
     """A clearly stated decade/range must not disappear during interpretation."""
     decades = [int(y) for y in re.findall(r'\b((?:19|20)\d0)(?:s|er(?:n)?)\b', text, flags=re.I)]
     ranges = re.findall(r'\b((?:19|20)\d{2})\s*(?:[-–]|bis|to)\s*((?:19|20)\d{2})\b', text, flags=re.I)
@@ -357,6 +357,10 @@ def check_explicit_period(request, text):
         expected = (min(int(a) for a, _ in ranges), max(int(b) for _, b in ranges))
     elif decades:
         expected = (min(decades), max(decades) + 9)
+    elif re.search(r'\b(?:released(?: in)? this year|came out this year|from this year|aus diesem jahr|'
+                   r'dieses jahr (?:rauskam|raus kam|erschien|veröffentlicht))\b', text, flags=re.I):
+        year = (today or datetime.date.today()).year
+        expected = (year, year)
     else:
         return request
     if (request.year_start, request.year_end) != expected:

@@ -35,6 +35,31 @@ def song(title='Hit', year='2003', artist='artist', isrc=None, **overrides):
 
 
 class InterpretationTests(unittest.TestCase):
+    def test_relative_year_uses_current_date_and_rejects_stale_model_year(self):
+        import datetime
+        today = datetime.date(2026, 11, 25)
+        for text in ('Fairy, released this year', 'Fairy, der dieses Jahr rauskam'):
+            with self.assertRaisesRegex(RequestValidationError, '2026–2026'):
+                check_explicit_period(request(year_start=2025, year_end=2025), text, today)
+            plan = request(year_start=2026, year_end=2026)
+            self.assertEqual(check_explicit_period(plan, text, today), plan)
+        unconstrained = request(year_start=None, year_end=None)
+        self.assertEqual(check_explicit_period(unconstrained, 'play This Year by The Mountain Goats', today), unconstrained)
+
+    def test_unfamiliar_explicit_song_is_sent_to_spotify_without_invented_artist(self):
+        import datetime
+        data = dict(kind='songs', artists=['John Michael Howell'],
+                    songs=[dict(artist='John Michael Howell', title='Fairy')],
+                    year_start=None, year_end=None, style='', mood='', selection='any', continue_similar=False)
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'}), \
+             patch.object(ai_request, '_request_model', return_value=data) as model:
+            plan = ai_request.ask_claude('the song fairy by john michael howell')
+        self.assertEqual(plan.artists, ('John Michael Howell',))
+        self.assertEqual(plan.songs[0].title, 'Fairy')
+        prompt = json.loads(model.call_args.args[0])['system']
+        self.assertIn(datetime.date.today().isoformat(), prompt)
+        self.assertIn('even if you do not know the artist or song', prompt)
+
     def test_reference_schema_and_summary(self):
         plan = request(selection='hits', songs=[dict(artist='Artist', title='Hit')],
                        reference_songs=[dict(artist='Artist', title='Anchor')],

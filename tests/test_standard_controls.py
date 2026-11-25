@@ -92,7 +92,7 @@ class StandardControlsTests(unittest.TestCase):
             self.assertNotIn(f'F13 & {number}::', ahk)
         for number, command in [(1, '5'), (2, '"skip"'), (3, '"ban-artist"'), (4, '"ban"'), (5, '"quit"')]:
             self.assertIn(f'F13 & {number}::SendDJ({command})', ahk)
-        for number, label in [(1, 'Standard'), (2, 'Skip'), (3, 'Künstler sperren'), (4, 'Song sperren'), (5, 'DJ beenden')]:
+        for number, label in [(1, 'Standard'), (2, 'Skip'), (3, 'Ban artist'), (4, 'Ban track'), (5, 'Quit DJ')]:
             self.assertIn(f'F13 + {number}</kbd> = {label}', html)
         self.assertIn('>Standard</button>', html)
         self.assertNotIn('id="btn-ai"', html)

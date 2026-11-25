@@ -73,6 +73,32 @@ class ArtistResolutionTests(unittest.TestCase):
         self.assertEqual([c.kwargs['type'] for c in self.sp.search.call_args_list], ['artist', 'track', 'track'])
         self.assertIn('Internet Friends', self.sp.search.call_args_list[1].kwargs['q'])
 
+    def test_explicit_single_song_resolves_eight_namesakes_without_extra_hints(self):
+        name = 'John Michael Howell'
+        self.sp.search.side_effect = [results(*[(name, str(i)) for i in range(8)]),
+            dict(tracks=dict(items=[self.anchored_track('Fairy', '3', name)]))]
+        found = resolve_artists_to_ids(self.sp, [name], {}, explicit_songs=[SongWish(name, 'Fairy')])
+        self.assertEqual(found, [(name, '3')])
+        self.assertEqual(self.sp.search.call_count, 2)
+        self.assertIn('track:"Fairy"', self.sp.search.call_args.kwargs['q'])
+
+    def test_explicit_song_remains_ambiguous_when_two_profiles_have_it(self):
+        name = 'John Michael Howell'
+        self.sp.search.side_effect = [results((name, 'one'), (name, 'two')),
+            dict(tracks=dict(items=[self.anchored_track('Fairy', i, name) for i in ('one', 'two')]))]
+        self.assertEqual(resolve_artists_to_ids(self.sp, [name], {},
+            explicit_songs=[SongWish(name, 'Fairy')]), [])
+
+    def test_explicit_song_cannot_match_cover_remix_or_invalid_album(self):
+        name = 'John Michael Howell'
+        invalid = self.anchored_track('Fairy', 'one', name)
+        invalid['album'] = {}
+        self.sp.search.side_effect = [results((name, 'one'), (name, 'two')),
+            dict(tracks=dict(items=[invalid, self.anchored_track('Fairy (Remix)', 'one', name),
+                                   self.anchored_track('Fairy', 'one', 'Other')]))]
+        self.assertEqual(resolve_artists_to_ids(self.sp, [name], {},
+            explicit_songs=[SongWish(name, 'Fairy')]), [])
+
     def test_cached_catalog_can_prove_two_titles_without_extra_requests(self):
         self.sp.search.return_value = results(('Perturbator', 'wrong'), ('Perturbator', 'right'))
         hints = [SongWish('Perturbator', 'Future Club'), SongWish('Perturbator', 'Humans Are Such Easy Prey')]
