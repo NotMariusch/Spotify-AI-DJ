@@ -305,6 +305,27 @@ keine dauerhaften Lerngewichte, Präferenzdateien oder AI-Künstlerpools veränd
 
 ## AI-Modus: spontane Wünsche
 
+Albumwünsche werden separat aufgelöst: beispielsweise „das Album The Poet von
+John Michael Howell“ oder „play the latest album by John Michael Howell“.
+Claude liefert nur Künstler und Albumtitel bzw. den Wunsch nach dem neuesten
+Album. Spotify liefert Album-ID, Veröffentlichungsdatum und Titelliste.
+Ein ausgelassenes führendes „The“ im Albumtitel wird toleriert; andere Titel
+oder Deluxe-/Live-Zusätze werden nicht stillschweigend gleichgesetzt.
+Mehrdeutige Veröffentlichungen erfordern eine Konkretisierung. Für „neueste“
+werden nur Alben betrachtet, keine Singles, Compilations oder zukünftigen
+Veröffentlichungen. Maßgeblich ist das Spotify-Katalogdatum, das auch eine
+Neuauflage beschreiben kann. Die Suche ist begrenzt; unvollständige Listen
+führen zu einem Hinweis statt zu einem geratenen Album.
+
+Albumtitel laufen in der Spotify-Albumreihenfolge. Filter, Sperren und explizite
+Session-Ausschlüsse bleiben wirksam; ausgelassene Titel werden gemeldet.
+Bei erlaubten Wiederholungen läuft nur dieses Album wieder von vorne, ohne
+andere Katalogtitel hinzuzumischen. Ohne Wiederholungen endet die Auswahl.
+Der Start bleibt beim bewährten Album-Kontext mit Track-Offset.
+Aus bestätigter Wiedergabe bekannte Künstlerprofile werden ausschließlich
+im Arbeitsspeicher wiederverwendet, nicht als dauerhafte Vorliebe gespeichert
+und nicht als IDs an Claude geschickt. „Neue AI-Session“ löscht diese Zuordnung.
+
 Anfragen im Dashboard funktionieren auf Deutsch, Englisch und gemischt. Alternativ:
 
 ```powershell

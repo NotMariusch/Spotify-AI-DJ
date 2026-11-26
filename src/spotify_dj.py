@@ -69,6 +69,7 @@ personal_director = PersonalDirector()
 ai_history_exclusions = set()
 ai_song_queue = []  # Explicit wishes only; consume after confirmed playback.
 ai_song_cycle = ()  # Validated ordered requests; repeats never add other songs.
+ai_album_tracks = []  # Request-local, Spotify-resolved ordered album tracks.
 ai_song_resolutions = {}  # Resume bounded lookups after a cooldown; request-local only.
 ai_session = AISession()  # Conversation, exclusions and listening history; never saved.
 
@@ -983,7 +984,7 @@ def ai_artist_order(pool, preferred=None):
 
 
 def ai_track_versions(tracks):
-    targeted = ai_request_plan is not None and (ai_request_plan.kind == "songs" or ai_request_plan.selection == "hits")
+    targeted = ai_request_plan is not None and (ai_request_plan.kind in ('songs', 'album') or ai_request_plan.selection == "hits")
     return select_best_tracks(tracks, min_duration_ms=1000 if targeted else 90000,
                               allow_compilations=targeted)
 
@@ -1015,11 +1016,11 @@ def ensure_ai_catalogs():
 
 def explicit_songs_pending():
     return (auto_mode == "ai" and ai_request_plan is not None
-            and (bool(ai_song_queue) or (ai_request_plan.kind == "songs" and not ai_request_plan.continue_similar)))
+            and (bool(ai_song_queue) or (ai_request_plan.kind in ('songs', 'album') and not ai_request_plan.continue_similar)))
 
 
 def song_cycle_repeats():
-    return bool(auto_mode == 'ai' and ai_request_plan is not None and ai_request_plan.kind == 'songs'
+    return bool(auto_mode == 'ai' and ai_request_plan is not None and ai_request_plan.kind in ('songs', 'album')
                 and not ai_request_plan.continue_similar and ai_repeat_policy() == 'allow' and ai_song_cycle)
 
 
@@ -1039,6 +1040,7 @@ def prepare_reference_selection(interpreted, user_request):
     qualify = lambda ts: select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
     interpreted, evidence = resolve_reference_contexts(sp, interpreted, qualify)
     known = dict(ARTISTS)
+    known.update(ai_session.verified_artists)
     known.update({n: entry['id'] for n, entry in discovered_artists.items()})
     for name, tracks in evidence.items():
         known[name] = next(a['id'] for a in tracks[0]['artists'] if a['name'] == name)
@@ -1183,6 +1185,22 @@ def ensure_structured_request():
     if ai_request_tracks_ready:
         return True
     plan = ai_request_plan
+    if plan.kind == 'album':
+        if not ai_album_tracks or not ai_pool:
+            status('Album noch nicht auf Spotify aufgelöst; Anfrage erneut senden')
+            return False
+        name = ai_pool[0][0]
+        tracks = [t for t in ai_album_tracks if t.get('id') not in banned_track_ids
+                  and not ({a.get('name') for a in t.get('artists', [])} & banned_artist_names)
+                  and ai_session.allows(plan, name, t, explicit=not plan.avoid_session_repeats)]
+        if not tracks:
+            status('Keine passenden Albumtitel nach den Session-Ausschlüssen')
+            return False
+        ai_song_queue.extend((name, t) for t in tracks)
+        ai_song_cycle = tuple(ai_song_queue)
+        ai_session_catalogs[name] = tracks
+        ai_request_tracks_ready = True
+        return True
     raw = {}
     reference_found = []
     try:
@@ -1534,6 +1552,7 @@ def run_dj():
                 ai_request_tracks_ready = False
                 ai_song_queue.clear()
                 ai_song_cycle = ()
+                ai_album_tracks.clear()
                 ai_song_resolutions.clear()
                 user_request = choice[3:].strip()
                 if is_session_reset(user_request):
@@ -1566,6 +1585,7 @@ def run_dj():
 
                         # Build artist dict for ID resolution only
                         all_artists = dict(ARTISTS)
+                        all_artists.update(ai_session.verified_artists)
                         for name, entry in discovered_artists.items():
                             if name not in all_artists:
                                 all_artists[name] = entry["id"]
@@ -1574,11 +1594,22 @@ def run_dj():
 
                         catalog_evidence = {n: entry.get('tracks', []) for n, entry in track_disk_cache.items()}
                         catalog_evidence.update(artist_cache)
-                        resolved = resolve_artists_to_ids(
-                            sp, artist_names, all_artists,
-                            song_hints=ai_request_plan.artist_hints + ai_request_plan.reference_songs + ai_request_plan.songs,
-                            catalog_evidence=catalog_evidence,
-                            explicit_songs=ai_request_plan.songs if ai_request_plan.kind == 'songs' else ())
+                        if ai_request_plan.kind == 'album':
+                            from album_request import resolve_album
+                            def qualify_album(ts):
+                                return [t for t in select_best_tracks(ts, min_duration_ms=1000, allow_compilations=True)
+                                        if t.get('id') not in banned_track_ids
+                                        and not ({a.get('name') for a in t.get('artists', [])} & banned_artist_names)
+                                        and ai_session.allows(ai_request_plan, '', t, explicit=not ai_request_plan.avoid_session_repeats)]
+                            name, artist_id, tracks = resolve_album(sp, ai_request_plan, all_artists, qualify_album)
+                            ai_album_tracks.extend(tracks)
+                            resolved = [(name, artist_id)]
+                        else:
+                            resolved = resolve_artists_to_ids(
+                                sp, artist_names, all_artists,
+                                song_hints=ai_request_plan.artist_hints + ai_request_plan.reference_songs + ai_request_plan.songs,
+                                catalog_evidence=catalog_evidence,
+                                explicit_songs=ai_request_plan.songs if ai_request_plan.kind == 'songs' else ())
                         if not resolved:
                             status("AI: keine angefragten Künstler gefunden; neuer DJ-Befehl erforderlich")
                         else:

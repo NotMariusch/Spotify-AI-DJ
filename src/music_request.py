@@ -57,12 +57,15 @@ class MusicRequest:
     less_songs: tuple | None = None
     reference_songs: tuple = ()
     similarity_traits: tuple = ()
+    album: dict | None = None  # User intent only: title or latest, no model IDs.
 
     def summary(self):
         period = f'{self.year_start}–{self.year_end}' if self.year_start is not None else 'ohne Jahresgrenze'
         selection = 'bekannte Hits' if self.selection == 'hits' else 'freie Titelauswahl'
         if self.kind == 'songs':
             selection = f'{len(self.songs)} konkrete Songwünsche in Reihenfolge'
+        if self.kind == 'album':
+            selection = 'Album: ' + ('neuestes Album' if self.album['latest'] else self.album['title']) + ' · Originalreihenfolge'
         if self.reference_songs:
             selection = 'ähnlich zu ' + ', '.join(f'{s.artist} — {s.title}' for s in self.reference_songs)
         traits = ' · Auswahl: ' + ', '.join(self.similarity_traits) if self.similarity_traits else ''
@@ -71,7 +74,7 @@ class MusicRequest:
 
 def parse_music_request(data, allow_empty_hit_refinement=False, allow_reference_planning=False):
     fields = {'kind', 'artists', 'songs', 'year_start', 'year_end', 'style', 'mood', 'selection', 'continue_similar'}
-    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats', 'artist_hints', 'repeat_policy', 'less_artists', 'less_songs', 'reference_songs', 'similarity_traits'}
+    optional = {'clarification', 'context_action', 'artist_scope', 'excluded_artists', 'excluded_songs', 'avoid_session_repeats', 'artist_hints', 'repeat_policy', 'less_artists', 'less_songs', 'reference_songs', 'similarity_traits', 'album'}
     if not isinstance(data, dict) or set(data) - fields - optional or not fields <= set(data):
         raise RequestValidationError('Ungültige strukturierte AI-Antwort; bitte erneut versuchen.')
     clarification = data.get('clarification')
@@ -79,7 +82,7 @@ def parse_music_request(data, allow_empty_hit_refinement=False, allow_reference_
         if not isinstance(clarification, str) or not 1 <= len(clarification.strip()) <= 250:
             raise RequestValidationError('Ungültige Rückfrage der AI.')
         raise RequestValidationError('Rückfrage: ' + clarification.strip())
-    if data['kind'] not in ('discovery', 'songs') or data['selection'] not in ('any', 'hits'):
+    if data['kind'] not in ('discovery', 'songs', 'album') or data['selection'] not in ('any', 'hits'):
         raise RequestValidationError('Unbekannte Art der Musikanfrage.')
     if type(data['continue_similar']) is not bool or (data['kind'] != 'songs' and data['continue_similar']):
         raise RequestValidationError('Ungültige Fortsetzung der Songwünsche.')
@@ -95,6 +98,18 @@ def parse_music_request(data, allow_empty_hit_refinement=False, allow_reference_
             not isinstance(n, str) or not 1 <= len(n.strip()) <= 120 for n in artists):
         raise RequestValidationError('Die Anfrage braucht 1–12 konkrete Künstlernamen.')
     artists = tuple(dict.fromkeys(n.strip() for n in artists))
+    album = data.get('album')
+    if data['kind'] == 'album':
+        if (not isinstance(album, dict) or set(album) != {'title', 'latest'}
+                or not isinstance(album['title'], str) or len(album['title']) > 200
+                or type(album['latest']) is not bool or len(artists) != 1
+                or (album['latest'] and album['title'].strip())
+                or (not album['latest'] and not song_key(album['title']))
+                or data['songs'] or data['selection'] != 'any'):
+            raise RequestValidationError('Albumwünsche brauchen einen Künstler und entweder einen Titel oder latest=true.')
+        album = dict(title=album['title'].strip(), latest=album['latest'])
+    elif album is not None:
+        raise RequestValidationError('Albumangaben sind nur für Albumwünsche erlaubt.')
     allowed = {artist_key(n) for n in artists}
     if '' in allowed:
         raise RequestValidationError('Künstlernamen dürfen nicht nur aus Satzzeichen bestehen.')
@@ -187,7 +202,7 @@ def parse_music_request(data, allow_empty_hit_refinement=False, allow_reference_
     return MusicRequest(data['kind'], artists, tuple(parsed), start, end,
                         data['style'].strip(), data['mood'].strip(), data['selection'], data['continue_similar'],
                         action, scope, tuple(dict.fromkeys(n.strip() for n in excluded)), tuple(excluded_wishes), avoid, tuple(parsed_hints), repeat_policy,
-                        less_artists, less_songs, tuple(parsed_references), tuple(t.strip() for t in traits))
+                        less_artists, less_songs, tuple(parsed_references), tuple(t.strip() for t in traits), album)
 
 
 def resolve_reference_contexts(sp, plan, qualify):

@@ -35,6 +35,7 @@ class AISession:
         self.less_songs = ()
         self.recent_music = deque(maxlen=12)
         self.track_plays = OrderedDict()
+        self.verified_artists = {}  # Spotify IDs from confirmed playback; never sent to Claude.
 
     def leave_ai(self):
         # A normal mode ends the old conversation topic, not the listening session.
@@ -134,6 +135,12 @@ class AISession:
         if not isinstance(title, str) or not song_key(title):
             return
         self.last_song = dict(artist=name, title=title)
+        if count_start:
+            matches = [a for a in track.get('artists', []) if a.get('id') and artist_key(a.get('name', '')) == artist_key(name)]
+            if len(matches) == 1:
+                self.verified_artists[matches[0]['name']] = matches[0]['id']
+                if len(self.verified_artists) > 100:
+                    del self.verified_artists[next(iter(self.verified_artists))]
         if not self.recent_music or self.recent_music[-1] != self.last_song:
             self.recent_music.append(dict(self.last_song))
         for key in self.track_keys(name, track):
